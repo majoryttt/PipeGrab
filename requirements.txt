@@ -1,0 +1,7 @@
+aiogram>=3.17.0
+pydantic>=2.10.0
+pydantic-settings>=2.7.0
+yt-dlp>=2025.1.0
+aiofiles>=24.1.0
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
