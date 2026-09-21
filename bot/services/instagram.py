@@ -14,6 +14,7 @@ import aiohttp
 import yt_dlp
 
 from bot.config import settings
+from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
 
@@ -331,9 +332,10 @@ class InstagramService:
         if not shortcode:
             return None
         embed_url = f"https://www.instagram.com/p/{shortcode}/embed/captioned/"
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout, headers=self.headers) as session:
-            async with session.get(embed_url) as resp:
+        try:
+            session = await http_client.get_session()
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with session.get(embed_url, headers=self.headers, timeout=timeout) as resp:
                 if resp.status != 200:
                     return None
                 text = await resp.text()
@@ -394,6 +396,8 @@ class InstagramService:
                             media_type=media_type,
                             items=items
                         )
+        except Exception as e:
+            logger.debug(f"_extract_from_embed error for {url}: {e}")
         return None
 
     async def download_media(
@@ -402,27 +406,27 @@ class InstagramService:
         download_dir: Path
     ) -> Tuple[List[Path], str]:
         """
-        Download extracted Instagram media items.
+        Download extracted Instagram media items concurrently.
         Returns:
             Tuple of (files_list, media_type: 'photo' | 'album' | 'video')
         """
         task_id = str(uuid.uuid4())[:8]
         download_dir.mkdir(parents=True, exist_ok=True)
-        downloaded_files: List[Path] = []
 
-        timeout = aiohttp.ClientTimeout(total=45)
-        async with aiohttp.ClientSession(timeout=timeout, headers=self.headers) as session:
-            for idx, item in enumerate(data.items, 1):
-                ext = "mp4" if item.media_type == "video" else "jpg"
-                file_path = download_dir / f"{task_id}_item_{idx}.{ext}"
-                try:
-                    async with session.get(item.url) as resp:
-                        if resp.status == 200:
-                            async with aiofiles.open(file_path, "wb") as f:
-                                await f.write(await resp.read())
-                            downloaded_files.append(file_path)
-                except Exception as e:
-                    logger.warning(f"Failed to download Instagram item {item.url}: {e}")
+        download_tasks = []
+        file_paths = []
+        for idx, item in enumerate(data.items, 1):
+            ext = "mp4" if item.media_type == "video" else "jpg"
+            file_path = download_dir / f"{task_id}_item_{idx}.{ext}"
+            file_paths.append(file_path)
+            download_tasks.append(http_client.download_file(item.url, file_path, headers=self.headers))
+
+        results = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+        downloaded_files = [
+            fp for fp, res in zip(file_paths, results)
+            if res is True and fp.exists() and fp.stat().st_size > 0
+        ]
 
         final_media_type = data.media_type
         if len(downloaded_files) == 1 and final_media_type == "album":

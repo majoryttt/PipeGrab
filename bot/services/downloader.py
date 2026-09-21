@@ -16,6 +16,7 @@ from bot.services.ffmpeg_utils import get_video_metadata, generate_thumbnail
 from bot.services.pinterest import pinterest_service, is_pinterest_url
 from bot.services.tiktok import tiktok_service, is_tiktok_url, resolve_tiktok_url
 from bot.services.instagram import instagram_service, is_instagram_url
+from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +119,19 @@ class MediaInfo:
 class DownloaderService:
     def __init__(self):
         self.download_dir = settings.downloads_dir
+        self._cache: Dict[str, Tuple[float, MediaInfo]] = {}
+
+    def get_cached_info(self, url: str) -> Optional[MediaInfo]:
+        if url in self._cache:
+            ts, info = self._cache[url]
+            if time.time() - ts < 300:  # 5 minutes TTL
+                return info
+            del self._cache[url]
+        return None
+
+    def set_cached_info(self, url: str, info: MediaInfo):
+        if not info.error_message:
+            self._cache[url] = (time.time(), info)
 
     def _get_base_ydl_opts(self) -> Dict[str, Any]:
         opts: Dict[str, Any] = {
@@ -128,6 +142,10 @@ class DownloaderService:
             "ignore_no_formats_error": True,
             "logtostderr": False,
             "source_address": "0.0.0.0",
+            # Speed optimizations
+            "concurrent_fragment_downloads": 8,
+            "buffersize": 1048576,
+            "http_chunk_size": 10485760,
             # Useful user-agent to reduce 403s on YouTube / TikTok / Instagram
             "user_agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -143,6 +161,10 @@ class DownloaderService:
         """
         Extract metadata without downloading media.
         """
+        cached = self.get_cached_info(url)
+        if cached:
+            return cached
+
         platform = detect_platform(url)
 
         # 1. Specialized Pinterest handler (handles images, albums, gifs, videos, and boards)
@@ -346,12 +368,12 @@ class DownloaderService:
             except Exception as pe:
                 logger.warning(f"Pinterest direct download failed for {url}: {pe}")
 
-        # 2. Specialized TikTok handler for photo posts / slideshows
+        # 2. Specialized TikTok handler: fast direct download for videos, photo posts, and slideshows
         if platform == Platform.TIKTOK and not audio_only:
             url = await resolve_tiktok_url(url)
             try:
                 tk_data = await tiktok_service.extract_data(url)
-                if tk_data and tk_data.is_photo:
+                if tk_data:
                     files, audio_path, final_type = await tiktok_service.download_media(
                         tk_data,
                         self.download_dir,
@@ -359,6 +381,11 @@ class DownloaderService:
                     )
                     if files:
                         total_size = sum(f.stat().st_size for f in files if f.exists())
+                        thumb_path = None
+                        if final_type == "video" and files[0].exists():
+                            candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
+                            thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
+
                         return MediaInfo(
                             title=tk_data.title,
                             duration=tk_data.duration,
@@ -371,10 +398,11 @@ class DownloaderService:
                             file_path=files[0],
                             file_paths=files,
                             file_size=total_size,
+                            thumbnail_path=thumb_path,
                             audio_path=audio_path
                         )
             except Exception as te:
-                logger.warning(f"TikTok direct photo download failed for {url}: {te}")
+                logger.warning(f"TikTok direct download failed for {url}: {te}")
 
         # 3. Specialized Instagram handler for photos, albums, and stories
         if platform == Platform.INSTAGRAM and not audio_only:
@@ -468,14 +496,10 @@ class DownloaderService:
                 }],
             })
         else:
-            # Prefer H.264/AAC in mp4 for seamless playback in Telegram clients
+            # Prefer fast MP4 download without FFmpeg merge if single stream available
             ydl_opts.update({
-                "format": "bestvideo[vcodec^=avc1]+bestaudio[acodec^=mp4a]/bestvideo+bestaudio/best",
+                "format": "best[ext=mp4]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]/bestvideo+bestaudio/best",
                 "merge_output_format": "mp4",
-                "postprocessors": [{
-                    "key": "FFmpegVideoRemuxer",
-                    "preferedformat": "mp4",
-                }],
             })
 
         def _download():
@@ -512,16 +536,34 @@ class DownloaderService:
 
             thumb_path = None
             if not audio_only and file_path.suffix.lower() in [".mp4", ".mov", ".mkv", ".webm"]:
-                meta = await get_video_metadata(file_path)
-                if not duration and meta["duration"]:
-                    duration = meta["duration"]
-                if not width and meta["width"]:
-                    width = meta["width"]
-                if not height and meta["height"]:
-                    height = meta["height"]
-
                 candidate_thumb = self.download_dir / f"{task_id}_thumb.jpg"
-                thumb_path = await generate_thumbnail(file_path, candidate_thumb, timestamp=1.0)
+                # 1. Fast thumbnail download from CDN if provided by extractor
+                thumb_url = info.get("thumbnail")
+                if not thumb_url and info.get("thumbnails"):
+                    valid_thumbs = [t.get("url") for t in info["thumbnails"] if t.get("url")]
+                    if valid_thumbs:
+                        thumb_url = valid_thumbs[-1]
+                if thumb_url:
+                    try:
+                        thumb_ok = await http_client.download_file(thumb_url, candidate_thumb)
+                        if thumb_ok and candidate_thumb.exists() and candidate_thumb.stat().st_size > 0:
+                            thumb_path = candidate_thumb
+                    except Exception as t_err:
+                        logger.debug(f"Failed to download thumbnail from {thumb_url}: {t_err}")
+
+                # 2. Fallback to ffmpeg thumbnail generation only if needed
+                if not thumb_path or not thumb_path.exists():
+                    thumb_path = await generate_thumbnail(file_path, candidate_thumb, timestamp=1.0)
+
+                # 3. Only invoke ffprobe if dimensions or duration were not in info
+                if not (duration and width and height):
+                    meta = await get_video_metadata(file_path)
+                    if not duration and meta["duration"]:
+                        duration = meta["duration"]
+                    if not width and meta["width"]:
+                        width = meta["width"]
+                    if not height and meta["height"]:
+                        height = meta["height"]
 
             media_type = MediaType.AUDIO if audio_only else MediaType.VIDEO
 

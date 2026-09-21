@@ -38,15 +38,20 @@ async def test_tiktok_photo_extract_and_download(tmp_path):
         }
     }
 
-    with patch("aiohttp.ClientSession.get") as mock_get:
+    async def fake_chunks(chunk_size):
+        yield b"fake-image-bytes"
+
+    with patch.object(service, "_extract_via_gallery_dl", new_callable=AsyncMock, return_value=None), \
+         patch("aiohttp.ClientSession.get") as mock_get:
         # Mock API response
         mock_api_resp = AsyncMock()
         mock_api_resp.status = 200
         mock_api_resp.json = AsyncMock(return_value=fake_tikwm_response)
 
         # Mock Image & Audio downloads
-        mock_media_resp = AsyncMock()
+        mock_media_resp = MagicMock()
         mock_media_resp.status = 200
+        mock_media_resp.content.iter_chunked = fake_chunks
         mock_media_resp.read = AsyncMock(return_value=b"fake-image-bytes")
 
         # Set up side effects for get calls

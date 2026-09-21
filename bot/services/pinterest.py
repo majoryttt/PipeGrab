@@ -15,6 +15,7 @@ import aiofiles
 import aiohttp
 
 from bot.config import settings
+from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +41,12 @@ async def resolve_pinterest_url(url: str, timeout_seconds: int = 10) -> str:
     if "pin.it" not in url:
         return url
     try:
+        session = await http_client.get_session()
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout, headers=PINTEREST_HEADERS) as session:
-            async with session.get(url, allow_redirects=True) as resp:
-                final_url = str(resp.url)
-                logger.info(f"Resolved pin.it url '{url}' -> '{final_url}'")
-                return final_url
+        async with session.get(url, allow_redirects=True, timeout=timeout) as resp:
+            final_url = str(resp.url)
+            logger.info(f"Resolved pin.it url '{url}' -> '{final_url}'")
+            return final_url
     except Exception as e:
         logger.warning(f"Failed to resolve pin.it redirect for {url}: {e}")
         return url
@@ -371,23 +372,26 @@ class PinterestService:
         downloaded_paths: List[Path] = []
         final_type = pin_data.media_type
 
-        timeout = aiohttp.ClientTimeout(total=60)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            # 1. Video pin
-            if pin_data.media_type == "video" and pin_data.video_url:
-                dest = download_dir / f"{task_id}_pinterest_video.mp4"
-                res = await self.download_file_with_fallback(session, pin_data.video_url, dest)
-                if res and res.exists():
-                    downloaded_paths.append(res)
-                    return downloaded_paths, "video"
+        session = await http_client.get_session()
+        # 1. Video pin
+        if pin_data.media_type == "video" and pin_data.video_url:
+            dest = download_dir / f"{task_id}_pinterest_video.mp4"
+            res = await self.download_file_with_fallback(session, pin_data.video_url, dest)
+            if res and res.exists():
+                downloaded_paths.append(res)
+                return downloaded_paths, "video"
 
-            # 2. Image / Album / GIF pin
-            total = len(pin_data.image_urls)
+        # 2. Image / Album / GIF pin concurrently
+        if pin_data.image_urls:
+            download_tasks = []
             for idx, img_url in enumerate(pin_data.image_urls, 1):
                 ext = ".gif" if img_url.lower().endswith(".gif") else ".jpg"
                 dest = download_dir / f"{task_id}_pin_{idx}{ext}"
-                res = await self.download_file_with_fallback(session, img_url, dest)
-                if res and res.exists():
+                download_tasks.append(self.download_file_with_fallback(session, img_url, dest))
+
+            results = await asyncio.gather(*download_tasks, return_exceptions=True)
+            for res in results:
+                if isinstance(res, Path) and res.exists() and res.stat().st_size > 0:
                     downloaded_paths.append(res)
 
         if not downloaded_paths:

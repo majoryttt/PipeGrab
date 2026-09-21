@@ -12,6 +12,7 @@ from bot.config import settings
 from bot.handlers.base import router as base_router
 from bot.handlers.download import router as download_router
 from bot.services.queue_manager import queue_manager
+from bot.services.http_client import http_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,6 +67,7 @@ async def main():
         await dp.start_polling(bot)
     finally:
         cleanup_task.cancel()
+        await http_client.close()
         await bot.session.close()
         logger.info("Bot shut down gracefully.")
 

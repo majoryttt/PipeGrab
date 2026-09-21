@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 import aiofiles
 import aiohttp
 
+from bot.services.http_client import http_client
+
 logger = logging.getLogger(__name__)
 
 TIKTOK_HEADERS = {
@@ -37,12 +39,12 @@ async def resolve_tiktok_url(url: str, timeout_seconds: int = 10) -> str:
     if not (netloc.startswith("vt.") or netloc.startswith("vm.") or "/t/" in parsed.path or "tiktok.com/t/" in url):
         return url
     try:
+        session = await http_client.get_session()
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-        async with aiohttp.ClientSession(timeout=timeout, headers=TIKTOK_HEADERS) as session:
-            async with session.get(url, allow_redirects=True) as resp:
-                final_url = str(resp.url)
-                logger.info(f"Resolved TikTok redirect '{url}' -> '{final_url}'")
-                return final_url
+        async with session.get(url, headers=TIKTOK_HEADERS, allow_redirects=True, timeout=timeout) as resp:
+            final_url = str(resp.url)
+            logger.info(f"Resolved TikTok redirect '{url}' -> '{final_url}'")
+            return final_url
     except Exception as e:
         logger.warning(f"Failed to resolve TikTok redirect for {url}: {e}")
         return url
@@ -128,39 +130,39 @@ class TikTokService:
         # 2. TikWM API (fallback)
         api_url = f"https://www.tikwm.com/api/?url={resolved_url}"
         try:
+            session = await http_client.get_session()
             timeout = aiohttp.ClientTimeout(total=15)
-            async with aiohttp.ClientSession(timeout=timeout, headers=self.headers) as session:
-                async with session.get(api_url) as resp:
-                    if resp.status == 200:
-                        data = await resp.json(content_type=None)
-                        if data and data.get("code") == 0:
-                            d = data.get("data", {})
-                            item_id = str(d.get("id", ""))
-                            title = d.get("title") or "TikTok Media"
-                            author = d.get("author", {})
-                            uploader = author.get("nickname") or author.get("unique_id") or "TikTok User"
-                            images = d.get("images", [])
-                            music = d.get("music") or d.get("music_info", {}).get("play")
-                            music_title = d.get("music_info", {}).get("title")
-                            video_url = d.get("play") if not images else None
-                            duration = int(d.get("duration") or 0)
+            async with session.get(api_url, headers=self.headers, timeout=timeout) as resp:
+                if resp.status == 200:
+                    data = await resp.json(content_type=None)
+                    if data and data.get("code") == 0:
+                        d = data.get("data", {})
+                        item_id = str(d.get("id", ""))
+                        title = d.get("title") or "TikTok Media"
+                        author = d.get("author", {})
+                        uploader = author.get("nickname") or author.get("unique_id") or "TikTok User"
+                        images = d.get("images", [])
+                        music = d.get("music") or d.get("music_info", {}).get("play")
+                        music_title = d.get("music_info", {}).get("title")
+                        video_url = d.get("play") if not images else None
+                        duration = int(d.get("duration") or 0)
 
-                            is_photo = bool(images) or is_photo_url
+                        is_photo = bool(images) or is_photo_url
 
-                            return TikTokData(
-                                url=resolved_url,
-                                item_id=item_id,
-                                title=title,
-                                uploader=uploader,
-                                is_photo=is_photo,
-                                image_urls=images,
-                                video_url=video_url,
-                                music_url=music,
-                                music_title=music_title,
-                                duration=duration
-                            )
-                        else:
-                            logger.warning(f"TikWM returned error code {data.get('code') if data else 'None'}")
+                        return TikTokData(
+                            url=resolved_url,
+                            item_id=item_id,
+                            title=title,
+                            uploader=uploader,
+                            is_photo=is_photo,
+                            image_urls=images,
+                            video_url=video_url,
+                            music_url=music,
+                            music_title=music_title,
+                            duration=duration
+                        )
+                    else:
+                        logger.warning(f"TikWM returned error code {data.get('code') if data else 'None'}")
         except Exception as e:
             logger.warning(f"TikWM extraction failed for {resolved_url}: {e}")
 
@@ -178,9 +180,10 @@ class TikTokService:
     async def _extract_from_html(self, url: str) -> Optional[TikTokData]:
         """Fallback extraction directly from TikTok web page HTML."""
         import json
-        timeout = aiohttp.ClientTimeout(total=12)
-        async with aiohttp.ClientSession(timeout=timeout, headers=self.headers) as session:
-            async with session.get(url) as resp:
+        try:
+            session = await http_client.get_session()
+            timeout = aiohttp.ClientTimeout(total=12)
+            async with session.get(url, headers=self.headers, timeout=timeout) as resp:
                 if resp.status != 200:
                     return None
                 html = await resp.text()
@@ -221,6 +224,8 @@ class TikTokService:
                                 music_url=music_url,
                                 music_title=music_title
                             )
+        except Exception as e:
+            logger.debug(f"_extract_from_html error for {url}: {e}")
         return None
 
     async def download_media(
@@ -231,41 +236,57 @@ class TikTokService:
     ) -> Tuple[List[Path], Optional[Path], str]:
         """
         Download TikTok media.
+        Fast-path:
+          - If video: downloads direct MP4 stream via http_client in ~0.5s without yt-dlp/ffmpeg.
+          - If photo slideshow: downloads all images and audio concurrently using asyncio.gather.
         Returns:
             Tuple of (files_list, optional_audio_path, media_type_str: 'photo' | 'album' | 'video')
         """
         task_id = str(uuid.uuid4())[:8]
         download_dir.mkdir(parents=True, exist_ok=True)
 
-        if data.is_photo and data.image_urls:
-            downloaded_images: List[Path] = []
-            timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout, headers=self.headers) as session:
-                for idx, img_url in enumerate(data.image_urls, 1):
-                    ext = "jpg"
-                    file_path = download_dir / f"{task_id}_slide_{idx}.{ext}"
-                    try:
-                        async with session.get(img_url) as resp:
-                            if resp.status == 200:
-                                async with aiofiles.open(file_path, "wb") as f:
-                                    await f.write(await resp.read())
-                                downloaded_images.append(file_path)
-                    except Exception as e:
-                        logger.warning(f"Failed to download TikTok image {img_url}: {e}")
+        # 1. Fast direct video download
+        if not data.is_photo and data.video_url:
+            file_path = download_dir / f"{task_id}_tiktok.mp4"
+            logger.info(f"Fast-downloading TikTok video stream directly for {data.url}")
+            ok = await http_client.download_file(data.video_url, file_path, headers=self.headers)
+            if ok and file_path.exists() and file_path.stat().st_size > 0:
+                return [file_path], None, "video"
+            logger.warning(f"Fast video download failed for {data.video_url}, will fallback")
 
-            # Download background audio if present
-            audio_path: Optional[Path] = None
+        # 2. Parallel photo slideshow download
+        if data.is_photo and data.image_urls:
+            download_tasks = []
+            file_paths = []
+            for idx, img_url in enumerate(data.image_urls, 1):
+                f_path = download_dir / f"{task_id}_slide_{idx}.jpg"
+                file_paths.append(f_path)
+                download_tasks.append(http_client.download_file(img_url, f_path, headers=self.headers))
+
+            candidate_audio = None
             if data.music_url:
                 candidate_audio = download_dir / f"{task_id}_music.mp3"
-                try:
-                    async with aiohttp.ClientSession(timeout=timeout, headers=self.headers) as session:
-                        async with session.get(data.music_url) as resp:
-                            if resp.status == 200:
-                                async with aiofiles.open(candidate_audio, "wb") as f:
-                                    await f.write(await resp.read())
-                                audio_path = candidate_audio
-                except Exception as e:
-                    logger.warning(f"Failed to download TikTok background music: {e}")
+                download_tasks.append(http_client.download_file(data.music_url, candidate_audio, headers=self.headers))
+
+            results = await asyncio.gather(*download_tasks, return_exceptions=True)
+
+            if candidate_audio:
+                img_results = results[:-1]
+                music_res = results[-1]
+            else:
+                img_results = results
+                music_res = False
+
+            downloaded_images = [
+                fp for fp, res in zip(file_paths, img_results)
+                if res is True and fp.exists() and fp.stat().st_size > 0
+            ]
+
+            audio_path = (
+                candidate_audio
+                if (music_res is True and candidate_audio and candidate_audio.exists() and candidate_audio.stat().st_size > 0)
+                else None
+            )
 
             media_type = "photo" if len(downloaded_images) == 1 else "album"
             return downloaded_images, audio_path, media_type

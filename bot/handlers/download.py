@@ -2,6 +2,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Optional, List
@@ -119,9 +120,29 @@ async def handle_text_message(message: types.Message):
         )
         return
 
+    # Fast path for direct-download platforms (TikTok, Instagram, Twitter/X, Pinterest single pins):
+    # Skip get_info() to eliminate redundant metadata extraction and double network roundtrips.
+    is_pinterest_board = (
+        platform == Platform.PINTEREST and (
+            "/boards/" in url or bool(re.search(r'pinterest\.[^/]+/[^/]+/[^/]+/?$', url))
+        )
+    )
+    if platform != Platform.YOUTUBE and not is_pinterest_board:
+        status_msg = await message.reply("⚡ <i>Загружаю...</i>", parse_mode="HTML")
+        asyncio.create_task(
+            run_download_task(
+                chat_id=message.chat.id,
+                user_id=user_id,
+                url=url,
+                status_msg=status_msg,
+                audio_only=False
+            )
+        )
+        return
+
     status_msg = await message.reply("🔍 <i>Получаю информацию...</i>", parse_mode="HTML")
 
-    # Extract metadata
+    # Extract metadata for YouTube and playlists
     info = await downloader_service.get_info(url)
 
     # Check for authentication or privacy errors
@@ -286,16 +307,31 @@ async def run_download_task(
     audio_only: bool
 ):
     media: Optional[MediaInfo] = None
+    action_task = None
     try:
-        async with queue_manager.acquire(user_id):
-            await update_status_safely(status_msg, "⏳ <i>В очереди на скачивание...</i>")
+        # Background chat action loop to show native Telegram uploading indicator
+        async def _action_loop():
+            try:
+                act = "upload_document" if audio_only else "upload_video"
+                while True:
+                    await status_msg.bot.send_chat_action(chat_id=chat_id, action=act)
+                    await asyncio.sleep(4.5)
+            except (asyncio.CancelledError, Exception):
+                pass
 
+        action_task = asyncio.create_task(_action_loop())
+
+        async with queue_manager.acquire(user_id):
+            start_time = time.time()
             last_edit_time = 0.0
 
             async def progress_hook(p: DownloadProgress):
                 nonlocal last_edit_time
                 now = time.time()
-                if now - last_edit_time < 2.0 and p.status != "finished":
+                # Fast downloads (< 2.5s) don't need progress bar edits to minimize latency
+                if now - start_time < 2.5:
+                    return
+                if now - last_edit_time < 3.5 and p.status != "finished":
                     return
                 last_edit_time = now
 
@@ -528,6 +564,8 @@ async def run_download_task(
         logger.error(f"Unexpected error in download task: {e}")
         await update_status_safely(status_msg, f"❌ Произошла непредвиденная ошибка: {e}")
     finally:
+        if action_task:
+            action_task.cancel()
         # Guaranteed cleanup of all downloaded files
         if media:
             if media.file_path and media.file_path.exists():
