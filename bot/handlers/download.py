@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 import time
@@ -6,6 +7,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from aiogram import Router, types, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, CallbackQuery, InputMediaPhoto, InputMediaVideo
 
 from bot.config import settings
@@ -49,9 +51,50 @@ def format_eta(seconds: int) -> str:
     return f"{mins:02d}:{secs:02d}"
 
 
+def truncate_text(text: str, max_length: int = 500) -> str:
+    text = (text or "").strip()
+    if len(text) <= max_length:
+        return text
+    return text[:max_length - 3].rstrip() + "..."
+
+
+def build_safe_caption(
+    title: str,
+    url: str,
+    platform_name: str,
+    uploader: Optional[str] = None,
+    prefix: str = "🎬",
+    extra: str = ""
+) -> str:
+    clean_title = truncate_text(title, 400)
+    esc_title = html.escape(clean_title)
+    esc_url = html.escape(url, quote=True)
+    esc_platform = html.escape(platform_name)
+
+    parts = [f"{prefix} <b>{esc_title}</b>"]
+    if uploader:
+        esc_uploader = html.escape(truncate_text(uploader, 100))
+        parts.append(f"👤 <i>{esc_uploader}</i>")
+    if extra:
+        parts.append(html.escape(extra))
+    parts.append(f"🔗 <a href='{esc_url}'>{esc_platform}</a>")
+
+    caption = "\n".join(parts)
+    if len(caption) > 1024:
+        caption = caption[:1020] + "..."
+    return caption
+
+
 async def update_status_safely(message: types.Message, text: str):
     try:
         await message.edit_text(text, parse_mode="HTML")
+    except TelegramBadRequest:
+        try:
+            import re
+            plain = re.sub(r'<[^>]+>', '', text)
+            await message.edit_text(plain)
+        except Exception:
+            pass
     except Exception:
         # Ignore Telegram rate limits or identical content errors
         pass
@@ -123,9 +166,10 @@ async def handle_text_message(message: types.Message):
     if info.is_playlist and info.playlist_count > 0:
         source_label = "доска Pinterest" if platform == Platform.PINTEREST else "плейлист"
         items_label = "пинов" if platform == Platform.PINTEREST else "видео"
+        esc_title = html.escape(truncate_text(info.title, 100))
         await update_status_safely(
             status_msg,
-            f"📋 <b>Обнаружен(а) {source_label}:</b> <i>{info.title}</i>\n"
+            f"📋 <b>Обнаружен(а) {source_label}:</b> <i>{esc_title}</i>\n"
             f"📊 Всего {items_label}: <b>{info.playlist_count}</b>\n\n"
             f"Выберите, сколько {items_label} скачать:"
         )
@@ -135,10 +179,12 @@ async def handle_text_message(message: types.Message):
     # If YouTube single video: offer format choice (Video or MP3)
     if platform == Platform.YOUTUBE:
         duration_str = f"⏱ Длительность: {format_eta(info.duration)}\n" if info.duration else ""
+        esc_title = html.escape(truncate_text(info.title, 150))
+        esc_uploader = html.escape(truncate_text(info.uploader, 100))
         await update_status_safely(
             status_msg,
-            f"🎬 <b>{info.title}</b>\n"
-            f"👤 Автор: <i>{info.uploader}</i>\n"
+            f"🎬 <b>{esc_title}</b>\n"
+            f"👤 Автор: <i>{esc_uploader}</i>\n"
             f"{duration_str}\n"
             f"Выберите формат:"
         )
@@ -313,76 +359,155 @@ async def run_download_task(
             # Send media according to media_type
             try:
                 platform_title = media.platform.value
-                caption = f"🎬 <b>{media.title}</b>\n🔗 <a href='{url}'>{platform_title}</a>"
+                caption = build_safe_caption(
+                    title=media.title,
+                    url=url,
+                    platform_name=platform_title,
+                    prefix="🎬"
+                )
 
-                if media.media_type == MediaType.PHOTO:
-                    p_caption = f"📌 <b>{media.title}</b>\n👤 <i>{media.uploader}</i>\n🔗 <a href='{url}'>{platform_title}</a>"
-                    await status_msg.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=FSInputFile(str(media.file_path)),
-                        caption=p_caption,
-                        parse_mode="HTML"
-                    )
-                elif media.media_type == MediaType.ANIMATION:
-                    p_caption = f"📌 <b>{media.title}</b>\n🔗 <a href='{url}'>{platform_title}</a>"
-                    await status_msg.bot.send_animation(
-                        chat_id=chat_id,
-                        animation=FSInputFile(str(media.file_path)),
-                        caption=p_caption,
-                        parse_mode="HTML"
-                    )
-                elif media.media_type == MediaType.ALBUM:
-                    # Send media group, chunked to max 10 items per group (Telegram API limit)
-                    valid_files = [f for f in media.file_paths if f.exists()]
-                    chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
-                    for chunk_idx, chunk in enumerate(chunks):
-                        group = []
-                        for idx, fpath in enumerate(chunk):
-                            chunk_caption = (
-                                f"📌 <b>{media.title}</b> ({len(valid_files)} медиа)\n🔗 <a href='{url}'>{platform_title}</a>"
-                                if (chunk_idx == 0 and idx == 0) else None
-                            )
-                            if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
-                                group.append(InputMediaVideo(media=FSInputFile(str(fpath)), caption=chunk_caption, parse_mode="HTML"))
-                            else:
-                                group.append(InputMediaPhoto(media=FSInputFile(str(fpath)), caption=chunk_caption, parse_mode="HTML"))
-                        await status_msg.bot.send_media_group(chat_id=chat_id, media=group)
-                        if chunk_idx < len(chunks) - 1:
-                            await asyncio.sleep(1.0)
-                elif audio_only or media.media_type == MediaType.AUDIO:
-                    a_caption = f"🎵 <b>{media.title}</b>\n🔗 <a href='{url}'>{platform_title}</a>"
-                    await status_msg.bot.send_audio(
-                        chat_id=chat_id,
-                        audio=FSInputFile(str(media.file_path)),
-                        title=media.title[:100],
-                        performer=media.uploader[:100],
-                        duration=media.duration,
-                        caption=a_caption,
-                        parse_mode="HTML"
-                    )
-                else:  # VIDEO
-                    thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
-                    await status_msg.bot.send_video(
-                        chat_id=chat_id,
-                        video=FSInputFile(str(media.file_path)),
-                        duration=media.duration,
-                        width=media.width,
-                        height=media.height,
-                        thumbnail=thumb_file,
-                        caption=caption,
-                        parse_mode="HTML",
-                        supports_streaming=True
-                    )
+                try:
+                    if media.media_type == MediaType.PHOTO:
+                        p_caption = build_safe_caption(
+                            title=media.title,
+                            url=url,
+                            platform_name=platform_title,
+                            uploader=media.uploader,
+                            prefix="📌"
+                        )
+                        await status_msg.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=FSInputFile(str(media.file_path)),
+                            caption=p_caption,
+                            parse_mode="HTML"
+                        )
+                    elif media.media_type == MediaType.ANIMATION:
+                        p_caption = build_safe_caption(
+                            title=media.title,
+                            url=url,
+                            platform_name=platform_title,
+                            prefix="📌"
+                        )
+                        await status_msg.bot.send_animation(
+                            chat_id=chat_id,
+                            animation=FSInputFile(str(media.file_path)),
+                            caption=p_caption,
+                            parse_mode="HTML"
+                        )
+                    elif media.media_type == MediaType.ALBUM:
+                        # Send media group, chunked to max 10 items per group (Telegram API limit)
+                        valid_files = [f for f in media.file_paths if f.exists()]
+                        chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
+                        for chunk_idx, chunk in enumerate(chunks):
+                            group = []
+                            for idx, fpath in enumerate(chunk):
+                                chunk_caption = (
+                                    build_safe_caption(
+                                        title=media.title,
+                                        url=url,
+                                        platform_name=platform_title,
+                                        prefix="📌",
+                                        extra=f"({len(valid_files)} медиа)"
+                                    )
+                                    if (chunk_idx == 0 and idx == 0) else None
+                                )
+                                if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
+                                    group.append(InputMediaVideo(media=FSInputFile(str(fpath)), caption=chunk_caption, parse_mode="HTML"))
+                                else:
+                                    group.append(InputMediaPhoto(media=FSInputFile(str(fpath)), caption=chunk_caption, parse_mode="HTML"))
+                            await status_msg.bot.send_media_group(chat_id=chat_id, media=group)
+                            if chunk_idx < len(chunks) - 1:
+                                await asyncio.sleep(1.0)
+                    elif audio_only or media.media_type == MediaType.AUDIO:
+                        a_caption = build_safe_caption(
+                            title=media.title,
+                            url=url,
+                            platform_name=platform_title,
+                            prefix="🎵"
+                        )
+                        await status_msg.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=FSInputFile(str(media.file_path)),
+                            title=truncate_text(media.title, 100),
+                            performer=truncate_text(media.uploader, 100),
+                            duration=media.duration,
+                            caption=a_caption,
+                            parse_mode="HTML"
+                        )
+                    else:  # VIDEO
+                        thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
+                        await status_msg.bot.send_video(
+                            chat_id=chat_id,
+                            video=FSInputFile(str(media.file_path)),
+                            duration=media.duration,
+                            width=media.width,
+                            height=media.height,
+                            thumbnail=thumb_file,
+                            caption=caption,
+                            parse_mode="HTML",
+                            supports_streaming=True
+                        )
+                except TelegramBadRequest as tb_err:
+                    logger.warning(f"TelegramBadRequest sending HTML media ({tb_err}), retrying with plain text")
+                    plain_caption = f"{truncate_text(media.title, 900)}\n{url}"
+                    if media.media_type == MediaType.PHOTO:
+                        await status_msg.bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_caption)
+                    elif media.media_type == MediaType.ANIMATION:
+                        await status_msg.bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(media.file_path)), caption=plain_caption)
+                    elif media.media_type == MediaType.ALBUM:
+                        valid_files = [f for f in media.file_paths if f.exists()]
+                        chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
+                        for chunk_idx, chunk in enumerate(chunks):
+                            group = []
+                            for idx, fpath in enumerate(chunk):
+                                chunk_caption = plain_caption if (chunk_idx == 0 and idx == 0) else None
+                                if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
+                                    group.append(InputMediaVideo(media=FSInputFile(str(fpath)), caption=chunk_caption))
+                                else:
+                                    group.append(InputMediaPhoto(media=FSInputFile(str(fpath)), caption=chunk_caption))
+                            await status_msg.bot.send_media_group(chat_id=chat_id, media=group)
+                    elif audio_only or media.media_type == MediaType.AUDIO:
+                        await status_msg.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=FSInputFile(str(media.file_path)),
+                            title=truncate_text(media.title, 100),
+                            performer=truncate_text(media.uploader, 100),
+                            duration=media.duration,
+                            caption=plain_caption
+                        )
+                    else:
+                        thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
+                        await status_msg.bot.send_video(
+                            chat_id=chat_id,
+                            video=FSInputFile(str(media.file_path)),
+                            duration=media.duration,
+                            width=media.width,
+                            height=media.height,
+                            thumbnail=thumb_file,
+                            caption=plain_caption,
+                            supports_streaming=True
+                        )
 
                 # If there's an accompanying audio track (e.g. TikTok slideshow music)
                 if media.audio_path and media.audio_path.exists():
-                    audio_caption = f"🎵 <b>Звук из публикации:</b> {media.title}\n🔗 <a href='{url}'>{platform_title}</a>"
+                    audio_caption = build_safe_caption(
+                        title=f"Звук из публикации: {media.title}",
+                        url=url,
+                        platform_name=platform_title,
+                        prefix="🎵"
+                    )
                     try:
                         await status_msg.bot.send_audio(
                             chat_id=chat_id,
                             audio=FSInputFile(str(media.audio_path)),
                             caption=audio_caption,
                             parse_mode="HTML"
+                        )
+                    except TelegramBadRequest:
+                        await status_msg.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=FSInputFile(str(media.audio_path)),
+                            caption=f"🎵 Звук из публикации: {truncate_text(media.title, 400)}\n{url}"
                         )
                     except Exception as a_err:
                         logger.warning(f"Failed to send accompanying audio: {a_err}")
@@ -391,7 +516,8 @@ async def run_download_task(
                 await status_msg.delete()
             except Exception as send_err:
                 logger.error(f"Error sending media to chat {chat_id}: {send_err}")
-                await update_status_safely(status_msg, f"❌ <b>Ошибка при отправке в Telegram:</b> {send_err}")
+                esc_err = html.escape(str(send_err))
+                await update_status_safely(status_msg, f"❌ <b>Ошибка при отправке в Telegram:</b> {esc_err}")
 
     except ValueError:
         await update_status_safely(
@@ -439,15 +565,22 @@ async def run_playlist_task(
                 item_url = item["url"]
                 item_title = item["title"]
 
+                esc_item_title = html.escape(truncate_text(item_title, 100))
                 await update_status_safely(
                     status_msg,
-                    f"⬇️ <b>Загрузка {index}/{total_items}:</b>\n<i>{item_title}</i>"
+                    f"⬇️ <b>Загрузка {index}/{total_items}:</b>\n<i>{esc_item_title}</i>"
                 )
 
                 media = await downloader_service.download_media(item_url, audio_only=audio_only)
                 if media and (media.file_path or media.file_paths):
                     try:
-                        caption = f"🎬 <b>{media.title}</b> ({index}/{total_items})\n🔗 <a href='{item_url}'>{media.platform.value}</a>"
+                        caption = build_safe_caption(
+                            title=media.title,
+                            url=item_url,
+                            platform_name=media.platform.value,
+                            prefix="🎬",
+                            extra=f"({index}/{total_items})"
+                        )
                         if media.media_type == MediaType.PHOTO:
                             await status_msg.bot.send_photo(
                                 chat_id=chat_id,
@@ -459,8 +592,8 @@ async def run_playlist_task(
                             await status_msg.bot.send_audio(
                                 chat_id=chat_id,
                                 audio=FSInputFile(str(media.file_path)),
-                                title=media.title[:100],
-                                performer=media.uploader[:100],
+                                title=truncate_text(media.title, 100),
+                                performer=truncate_text(media.uploader, 100),
                                 duration=media.duration,
                                 caption=caption,
                                 parse_mode="HTML"
@@ -478,6 +611,15 @@ async def run_playlist_task(
                                 parse_mode="HTML",
                                 supports_streaming=True
                             )
+                    except TelegramBadRequest:
+                        plain_cap = f"{truncate_text(media.title, 800)} ({index}/{total_items})\n{item_url}"
+                        if media.media_type == MediaType.PHOTO:
+                            await status_msg.bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_cap)
+                        elif audio_only or media.media_type == MediaType.AUDIO:
+                            await status_msg.bot.send_audio(chat_id=chat_id, audio=FSInputFile(str(media.file_path)), caption=plain_cap)
+                        else:
+                            thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
+                            await status_msg.bot.send_video(chat_id=chat_id, video=FSInputFile(str(media.file_path)), thumbnail=thumb_file, caption=plain_cap, supports_streaming=True)
                     except Exception as e:
                         logger.error(f"Failed to send item {index}: {e}")
                     finally:

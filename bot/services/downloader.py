@@ -14,7 +14,7 @@ import yt_dlp
 from bot.config import settings
 from bot.services.ffmpeg_utils import get_video_metadata, generate_thumbnail
 from bot.services.pinterest import pinterest_service, is_pinterest_url
-from bot.services.tiktok import tiktok_service, is_tiktok_url
+from bot.services.tiktok import tiktok_service, is_tiktok_url, resolve_tiktok_url
 from bot.services.instagram import instagram_service, is_instagram_url
 
 logger = logging.getLogger(__name__)
@@ -175,23 +175,23 @@ class DownloaderService:
 
         # 2. Specialized TikTok handler (photo slideshows, photo mode, and redirect resolution)
         if platform == Platform.TIKTOK:
-            if "/photo/" in url or any(dom in url for dom in ["vt.tiktok", "vm.tiktok"]):
-                try:
-                    tk_data = await tiktok_service.extract_data(url)
-                    if tk_data and tk_data.is_photo:
-                        media_type = MediaType.PHOTO if len(tk_data.image_urls) == 1 else MediaType.ALBUM
-                        return MediaInfo(
-                            title=tk_data.title,
-                            duration=tk_data.duration,
-                            uploader=tk_data.uploader,
-                            is_playlist=False,
-                            playlist_count=0,
-                            platform=Platform.TIKTOK,
-                            url=tk_data.url,
-                            media_type=media_type
-                        )
-                except Exception as te:
-                    logger.warning(f"TikTok service extract failed for {url}: {te}")
+            url = await resolve_tiktok_url(url)
+            try:
+                tk_data = await tiktok_service.extract_data(url)
+                if tk_data and tk_data.is_photo:
+                    media_type = MediaType.PHOTO if len(tk_data.image_urls) == 1 else MediaType.ALBUM
+                    return MediaInfo(
+                        title=tk_data.title,
+                        duration=tk_data.duration,
+                        uploader=tk_data.uploader,
+                        is_playlist=False,
+                        playlist_count=0,
+                        platform=Platform.TIKTOK,
+                        url=tk_data.url,
+                        media_type=media_type
+                    )
+            except Exception as te:
+                logger.warning(f"TikTok service extract failed for {url}: {te}")
 
         # 3. Specialized Instagram handler (handles photos, albums/carousels, reels, stories)
         if platform == Platform.INSTAGRAM:
@@ -209,6 +209,8 @@ class DownloaderService:
                             url=url,
                             error_message=ig_data.error_message
                         )
+                    is_album = ig_data.media_type == "album" or len(ig_data.items) > 1
+                    media_type = MediaType.ALBUM if is_album else MediaType(ig_data.media_type)
                     return MediaInfo(
                         title=ig_data.title,
                         duration=ig_data.duration,
@@ -217,7 +219,7 @@ class DownloaderService:
                         playlist_count=0,
                         platform=Platform.INSTAGRAM,
                         url=ig_data.url,
-                        media_type=MediaType(ig_data.media_type)
+                        media_type=media_type
                     )
             except Exception as ie:
                 logger.warning(f"Instagram extractor failed for {url}, falling back to yt-dlp: {ie}")
@@ -271,8 +273,16 @@ class DownloaderService:
             err_str = str(e).lower()
             logger.error(f"Failed to get info for {url}: {e}")
 
-            if any(term in err_str for term in ["you need to log in", "login required", "checkpoint_required", "confirm you are not a robot"]):
-                err_code = "AUTH_REQUIRED_INSTAGRAM" if platform == Platform.INSTAGRAM else "AUTH_REQUIRED"
+            if any(term in err_str for term in [
+                "you need to log in",
+                "login required",
+                "checkpoint_required",
+                "confirm you are not a robot",
+                "this content is unreachable",
+                "use --cookies"
+            ]):
+                is_story = platform == Platform.INSTAGRAM and "/stories/" in url
+                err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else ("AUTH_REQUIRED_INSTAGRAM" if platform == Platform.INSTAGRAM else "AUTH_REQUIRED")
                 return MediaInfo(
                     title="Требуется авторизация",
                     duration=0,
@@ -338,33 +348,33 @@ class DownloaderService:
 
         # 2. Specialized TikTok handler for photo posts / slideshows
         if platform == Platform.TIKTOK and not audio_only:
-            if "/photo/" in url or any(dom in url for dom in ["vt.tiktok", "vm.tiktok"]):
-                try:
-                    tk_data = await tiktok_service.extract_data(url)
-                    if tk_data and tk_data.is_photo:
-                        files, audio_path, final_type = await tiktok_service.download_media(
-                            tk_data,
-                            self.download_dir,
-                            progress_callback=progress_callback
+            url = await resolve_tiktok_url(url)
+            try:
+                tk_data = await tiktok_service.extract_data(url)
+                if tk_data and tk_data.is_photo:
+                    files, audio_path, final_type = await tiktok_service.download_media(
+                        tk_data,
+                        self.download_dir,
+                        progress_callback=progress_callback
+                    )
+                    if files:
+                        total_size = sum(f.stat().st_size for f in files if f.exists())
+                        return MediaInfo(
+                            title=tk_data.title,
+                            duration=tk_data.duration,
+                            uploader=tk_data.uploader,
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.TIKTOK,
+                            url=tk_data.url,
+                            media_type=MediaType(final_type),
+                            file_path=files[0],
+                            file_paths=files,
+                            file_size=total_size,
+                            audio_path=audio_path
                         )
-                        if files:
-                            total_size = sum(f.stat().st_size for f in files if f.exists())
-                            return MediaInfo(
-                                title=tk_data.title,
-                                duration=tk_data.duration,
-                                uploader=tk_data.uploader,
-                                is_playlist=False,
-                                playlist_count=0,
-                                platform=Platform.TIKTOK,
-                                url=tk_data.url,
-                                media_type=MediaType(final_type),
-                                file_path=files[0],
-                                file_paths=files,
-                                file_size=total_size,
-                                audio_path=audio_path
-                            )
-                except Exception as te:
-                    logger.warning(f"TikTok direct photo download failed for {url}: {te}")
+            except Exception as te:
+                logger.warning(f"TikTok direct photo download failed for {url}: {te}")
 
         # 3. Specialized Instagram handler for photos, albums, and stories
         if platform == Platform.INSTAGRAM and not audio_only:
@@ -381,13 +391,13 @@ class DownloaderService:
                         url=url,
                         error_message=ig_data.error_message
                     )
-                if ig_data and ig_data.media_type in ["photo", "album"]:
+                if ig_data and ig_data.items:
                     files, final_type = await instagram_service.download_media(ig_data, self.download_dir)
                     if files:
                         total_size = sum(f.stat().st_size for f in files if f.exists())
                         return MediaInfo(
                             title=ig_data.title,
-                            duration=0,
+                            duration=ig_data.duration,
                             uploader=ig_data.uploader,
                             is_playlist=False,
                             playlist_count=0,
@@ -399,7 +409,7 @@ class DownloaderService:
                             file_size=total_size
                         )
             except Exception as ie:
-                logger.warning(f"Instagram direct photo download failed for {url}: {ie}")
+                logger.warning(f"Instagram direct download failed for {url}: {ie}")
 
         # 4. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, and Pinterest videos)
         task_id = str(uuid.uuid4())[:8]

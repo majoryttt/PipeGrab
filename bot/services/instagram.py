@@ -34,6 +34,20 @@ def is_instagram_url(url: str) -> bool:
     return "instagram.com" in netloc or netloc.endswith("instagram.com")
 
 
+def parse_instagram_story_url(url: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extract username and optional story_id from an Instagram story URL.
+    Returns (username, story_id). If highlight, username is 'highlights' and story_id is highlight_id.
+    """
+    match = re.search(r'instagram\.com/stories/(?:highlights/(\d+)|([^/?#&]+)(?:/(\d+))?)', url)
+    if not match:
+        return None, None
+    highlight_id, user, story_id = match.groups()
+    if highlight_id:
+        return "highlights", highlight_id
+    return user, story_id
+
+
 def extract_shortcode(url: str) -> Optional[str]:
     match = re.search(r'/(?:p|reel|tv|stories|share)/([^/?#&]+)', url)
     return match.group(1) if match else None
@@ -79,22 +93,104 @@ class InstagramService:
     def __init__(self):
         self.headers = INSTAGRAM_HEADERS
 
-    async def extract_data(self, url: str) -> Optional[InstagramData]:
-        """
-        Extract Instagram post/reel/story metadata supporting photos, albums, and videos.
-        """
-        shortcode = extract_shortcode(url) or "instagram_media"
+    async def _extract_story_via_gallery_dl(self, url: str) -> Optional[InstagramData]:
+        """Extract Instagram story using gallery-dl with cookies."""
+        import subprocess
+        import json
 
-        # Check for Instagram Stories without cookies
-        if "/stories/" in url and not settings.has_cookies:
+        user, target_story_id = parse_instagram_story_url(url)
+
+        def _run():
+            try:
+                cmd = ["gallery-dl", "-j"]
+                if settings.has_cookies:
+                    cmd.extend(["--cookies", str(settings.cookies_file)])
+                cmd.append(url)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                if res.returncode != 0:
+                    err_str = (res.stderr or "").lower()
+                    if any(t in err_str for t in ["auth", "login", "cookie", "not found"]):
+                        return "AUTH_REQUIRED"
+                    return None
+                entries = json.loads(res.stdout) if res.stdout else []
+                items: List[InstagramItem] = []
+                uploader = user or "Instagram User"
+                title = f"История @{uploader}" if not target_story_id else f"История @{uploader} ({target_story_id})"
+                duration = 0
+
+                for item in entries:
+                    code = item[0]
+                    if code == -1 and isinstance(item[1], dict):
+                        msg = item[1].get("message", "").lower()
+                        if any(t in msg for t in ["auth", "login", "cookie", "not found"]):
+                            return "AUTH_REQUIRED"
+                    elif code == 2 and isinstance(item[1], dict):
+                        d = item[1]
+                        uploader = d.get("user", {}).get("username") or d.get("username") or uploader
+                    elif code == 3 and isinstance(item[1], str):
+                        media_url = item[1]
+                        meta = item[2] if len(item) > 2 and isinstance(item[2], dict) else {}
+                        ext = (meta.get("extension") or "").lower()
+                        is_video = ext in ["mp4", "mov", "mkv"] or ".mp4" in media_url
+                        m_type = "video" if is_video else "photo"
+                        w = int(meta.get("width") or 0)
+                        h = int(meta.get("height") or 0)
+                        dur = int(meta.get("duration") or 0)
+                        if dur > duration:
+                            duration = dur
+                        items.append(InstagramItem(media_type=m_type, url=media_url, width=w, height=h))
+
+                if items:
+                    final_media_type = "album" if len(items) > 1 else items[0].media_type
+                    return InstagramData(
+                        url=url,
+                        shortcode=target_story_id or user or "story",
+                        title=title,
+                        uploader=uploader,
+                        media_type=final_media_type,
+                        items=items,
+                        duration=duration
+                    )
+            except Exception as e:
+                logger.warning(f"gallery-dl story extraction failed for {url}: {e}")
+            return None
+
+        result = await asyncio.to_thread(_run)
+        if result == "AUTH_REQUIRED":
             return InstagramData(
                 url=url,
-                shortcode=shortcode,
+                shortcode=target_story_id or user or "story",
                 title="Instagram Story",
                 uploader="Instagram",
                 media_type="video",
                 error_message="AUTH_REQUIRED_INSTAGRAM_STORY"
             )
+        return result
+
+    async def extract_data(self, url: str) -> Optional[InstagramData]:
+        """
+        Extract Instagram post/reel/story metadata supporting photos, albums, and videos.
+        """
+        shortcode = extract_shortcode(url) or "instagram_media"
+        is_story = "/stories/" in url
+        story_user, story_id = parse_instagram_story_url(url) if is_story else (None, None)
+
+        # Check for Instagram Stories without cookies
+        if is_story and not settings.has_cookies:
+            return InstagramData(
+                url=url,
+                shortcode=story_id or story_user or shortcode,
+                title="Instagram Story",
+                uploader=story_user or "Instagram",
+                media_type="video",
+                error_message="AUTH_REQUIRED_INSTAGRAM_STORY"
+            )
+
+        # For Instagram Stories with cookies, try gallery-dl first
+        if is_story:
+            g_story = await self._extract_story_via_gallery_dl(url)
+            if g_story:
+                return g_story
 
         # 1. Primary extractor: yt-dlp with ignore_no_formats_error=True
         def _extract_ydl():
@@ -106,6 +202,8 @@ class InstagramService:
                 "extract_flat": False,
                 "user_agent": self.headers["User-Agent"],
             }
+            if is_story and story_id:
+                opts["noplaylist"] = True
             if settings.has_cookies:
                 opts["cookiefile"] = str(settings.cookies_file)
 
@@ -124,7 +222,7 @@ class InstagramService:
             title = info.get("title") or info.get("description") or "Instagram Media"
             if len(title) > 80:
                 title = title[:77] + "..."
-            uploader = info.get("uploader") or info.get("channel") or "Instagram User"
+            uploader = info.get("uploader") or info.get("channel") or (story_user if is_story else "Instagram User")
 
             # Check if it's a playlist / carousel
             is_playlist = info.get("_type") == "playlist" or "entries" in info
@@ -150,7 +248,7 @@ class InstagramService:
                     media_type = "album" if len(items) > 1 else items[0].media_type
                     return InstagramData(
                         url=url,
-                        shortcode=shortcode,
+                        shortcode=story_id or story_user or shortcode,
                         title=title,
                         uploader=uploader,
                         media_type=media_type,
@@ -165,7 +263,7 @@ class InstagramService:
                 duration = int(info.get("duration") or 0)
                 return InstagramData(
                     url=url,
-                    shortcode=shortcode,
+                    shortcode=story_id or story_user or shortcode,
                     title=title,
                     uploader=uploader,
                     media_type="video",
@@ -178,7 +276,7 @@ class InstagramService:
                 if img_url:
                     return InstagramData(
                         url=url,
-                        shortcode=shortcode,
+                        shortcode=story_id or story_user or shortcode,
                         title=title,
                         uploader=uploader,
                         media_type="photo",
@@ -197,19 +295,28 @@ class InstagramService:
         # Check for authentication errors
         if ydl_error:
             err_str = str(ydl_error).lower()
-            if any(term in err_str for term in ["login required", "checkpoint_required", "confirm you are not a robot", "redirected to the login page"]):
+            if any(term in err_str for term in [
+                "login required",
+                "checkpoint_required",
+                "confirm you are not a robot",
+                "redirected to the login page",
+                "this content is unreachable",
+                "you need to log in",
+                "use --cookies"
+            ]):
+                err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else "AUTH_REQUIRED_INSTAGRAM"
                 return InstagramData(
                     url=url,
-                    shortcode=shortcode,
+                    shortcode=story_id or story_user or shortcode,
                     title="Требуется авторизация",
                     uploader="Instagram",
                     media_type="photo",
-                    error_message="AUTH_REQUIRED_INSTAGRAM"
+                    error_message=err_code
                 )
             elif "private account" in err_str or "this account is private" in err_str:
                 return InstagramData(
                     url=url,
-                    shortcode=shortcode,
+                    shortcode=story_id or story_user or shortcode,
                     title="Приватный аккаунт",
                     uploader="Instagram",
                     media_type="photo",

@@ -31,10 +31,10 @@ def is_tiktok_url(url: str) -> bool:
 
 
 async def resolve_tiktok_url(url: str, timeout_seconds: int = 10) -> str:
-    """Follow redirects to get canonical TikTok URL (e.g. from vt.tiktok.com or vm.tiktok.com)."""
+    """Follow redirects to get canonical TikTok URL (e.g. from vt.tiktok.com, vm.tiktok.com, or tiktok.com/t/...)."""
     parsed = urlparse(url)
     netloc = parsed.netloc.lower()
-    if not (netloc.startswith("vt.") or netloc.startswith("vm.") or "/t/" in parsed.path):
+    if not (netloc.startswith("vt.") or netloc.startswith("vm.") or "/t/" in parsed.path or "tiktok.com/t/" in url):
         return url
     try:
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
@@ -66,14 +66,66 @@ class TikTokService:
     def __init__(self):
         self.headers = TIKTOK_HEADERS
 
+    async def _extract_via_gallery_dl(self, url: str) -> Optional[TikTokData]:
+        """Extract TikTok photo slideshow using gallery-dl."""
+        import subprocess
+        import json
+
+        def _run():
+            try:
+                res = subprocess.run(["gallery-dl", "-j", url], capture_output=True, text=True, timeout=25)
+                if res.returncode != 0:
+                    return None
+                entries = json.loads(res.stdout)
+                title = "TikTok Photo"
+                uploader = "TikTok User"
+                item_id = ""
+                images: List[str] = []
+                music_url = None
+                for item in entries:
+                    code = item[0]
+                    if code == 2 and isinstance(item[1], dict):
+                        d = item[1]
+                        title = d.get("desc") or d.get("description") or title
+                        author = d.get("author", {}) if isinstance(d.get("author"), dict) else {}
+                        uploader = author.get("nickname") or author.get("unique_id") or uploader
+                        item_id = str(d.get("id") or d.get("aweme_id") or "")
+                    elif code == 3 and isinstance(item[1], str):
+                        u = item[1]
+                        if ".mp3" in u or "audio" in u or "mime_type=audio" in u:
+                            music_url = u
+                        else:
+                            images.append(u)
+                if images:
+                    return TikTokData(
+                        url=url,
+                        item_id=item_id,
+                        title=title,
+                        uploader=uploader,
+                        is_photo=True,
+                        image_urls=images,
+                        music_url=music_url
+                    )
+            except Exception as e:
+                logger.warning(f"gallery-dl extraction error for TikTok {url}: {e}")
+            return None
+
+        return await asyncio.to_thread(_run)
+
     async def extract_data(self, url: str) -> Optional[TikTokData]:
         """
-        Extract media metadata from TikTok URL via TikWM API (supports photos, slideshows and videos).
+        Extract media metadata from TikTok URL (supports photos, slideshows and videos).
         """
         resolved_url = await resolve_tiktok_url(url)
         is_photo_url = "/photo/" in resolved_url
 
-        # Query TikWM API
+        # 1. Primary extractor for photo slideshows: gallery-dl
+        if is_photo_url:
+            g_data = await self._extract_via_gallery_dl(resolved_url)
+            if g_data:
+                return g_data
+
+        # 2. TikWM API (fallback)
         api_url = f"https://www.tikwm.com/api/?url={resolved_url}"
         try:
             timeout = aiohttp.ClientTimeout(total=15)
@@ -81,7 +133,7 @@ class TikTokService:
                 async with session.get(api_url) as resp:
                     if resp.status == 200:
                         data = await resp.json(content_type=None)
-                        if data.get("code") == 0:
+                        if data and data.get("code") == 0:
                             d = data.get("data", {})
                             item_id = str(d.get("id", ""))
                             title = d.get("title") or "TikTok Media"
@@ -108,11 +160,11 @@ class TikTokService:
                                 duration=duration
                             )
                         else:
-                            logger.warning(f"TikWM returned error code {data.get('code')}: {data.get('msg')}")
+                            logger.warning(f"TikWM returned error code {data.get('code') if data else 'None'}")
         except Exception as e:
             logger.warning(f"TikWM extraction failed for {resolved_url}: {e}")
 
-        # Fallback: if it's explicitly a photo post, parse directly from page HTML
+        # 3. Fallback: if it's explicitly a photo post, parse directly from page HTML
         if is_photo_url:
             try:
                 data = await self._extract_from_html(resolved_url)

@@ -41,8 +41,8 @@
 
 ### 1. Клонирование и создание окружения
 ```bash
-git clone <ваш-репозиторий>
-cd TGbotForDownload
+git clone https://github.com/majoryttt/PipeGrab
+cd PipeGrab
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -87,8 +87,8 @@ python3 -m bot.main
 ### 1. Перенос на сервер
 Склонируйте проект на ваш Linux-сервер или скопируйте файлы:
 ```bash
-git clone <ваш-репозиторий>
-cd TGbotForDownload
+git clone https://github.com/majoryttt/PipeGrab
+cd PipeGrab
 cp .env.example .env
 nano .env  # Вставьте ваш BOT_TOKEN
 ```
