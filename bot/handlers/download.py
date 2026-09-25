@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Optional, List
 
-from aiogram import Router, types, F
+from aiogram import Bot, Router, types, F
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import FSInputFile, CallbackQuery, InputMediaPhoto, InputMediaVideo
 
@@ -16,6 +16,7 @@ from bot.keyboards.inline import (
     get_download_format_kb,
     get_playlist_kb,
     get_cached_url,
+    get_cached_message_id,
 )
 from bot.services.downloader import (
     downloader_service,
@@ -31,6 +32,36 @@ from bot.services.queue_manager import queue_manager
 logger = logging.getLogger(__name__)
 
 router = Router(name="download_router")
+
+
+def cleanup_messages_in_background(bot: Bot, chat_id: int, message_ids: list[Optional[int]]):
+    """
+    Fire-and-forget non-blocking deletion of status and source messages.
+    Uses batch delete_messages (Bot API 7.0+) for a single network call,
+    with fallback to individual deletion.
+    """
+    valid_ids = [m for m in message_ids if m is not None]
+    if not valid_ids:
+        return
+
+    async def _do_delete():
+        try:
+            if len(valid_ids) > 1 and hasattr(bot, "delete_messages"):
+                await bot.delete_messages(chat_id=chat_id, message_ids=valid_ids)
+            else:
+                for mid in valid_ids:
+                    try:
+                        await bot.delete_message(chat_id=chat_id, message_id=mid)
+                    except Exception:
+                        pass
+        except Exception:
+            for mid in valid_ids:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+
+    asyncio.create_task(_do_delete())
 
 
 def format_progress_bar(percent: float, length: int = 10) -> str:
@@ -120,6 +151,8 @@ async def handle_text_message(message: types.Message):
         )
         return
 
+    original_message_id = message.message_id
+
     # Fast path for direct-download platforms (TikTok, Instagram, Twitter/X, Pinterest single pins):
     # Skip get_info() to eliminate redundant metadata extraction and double network roundtrips.
     is_pinterest_board = (
@@ -135,7 +168,8 @@ async def handle_text_message(message: types.Message):
                 user_id=user_id,
                 url=url,
                 status_msg=status_msg,
-                audio_only=False
+                audio_only=False,
+                original_message_id=original_message_id
             )
         )
         return
@@ -194,7 +228,7 @@ async def handle_text_message(message: types.Message):
             f"📊 Всего {items_label}: <b>{info.playlist_count}</b>\n\n"
             f"Выберите, сколько {items_label} скачать:"
         )
-        await status_msg.edit_reply_markup(reply_markup=get_playlist_kb(url, info.playlist_count))
+        await status_msg.edit_reply_markup(reply_markup=get_playlist_kb(url, info.playlist_count, original_message_id=original_message_id))
         return
 
     # If YouTube single video: offer format choice (Video or MP3)
@@ -209,7 +243,7 @@ async def handle_text_message(message: types.Message):
             f"{duration_str}\n"
             f"Выберите формат:"
         )
-        await status_msg.edit_reply_markup(reply_markup=get_download_format_kb(url))
+        await status_msg.edit_reply_markup(reply_markup=get_download_format_kb(url, original_message_id=original_message_id))
         return
 
     # For TikTok, Instagram, Twitter, Pinterest: download directly
@@ -219,7 +253,8 @@ async def handle_text_message(message: types.Message):
             user_id=user_id,
             url=url,
             status_msg=status_msg,
-            audio_only=False
+            audio_only=False,
+            original_message_id=original_message_id
         )
     )
 
@@ -250,6 +285,9 @@ async def handle_download_callback(callback: CallbackQuery):
 
     await callback.answer()
     audio_only = (action == "audio")
+    orig_msg_id = get_cached_message_id(cid)
+    if not orig_msg_id and callback.message and callback.message.reply_to_message:
+        orig_msg_id = callback.message.reply_to_message.message_id
 
     asyncio.create_task(
         run_download_task(
@@ -257,7 +295,8 @@ async def handle_download_callback(callback: CallbackQuery):
             user_id=user_id,
             url=url,
             status_msg=callback.message,
-            audio_only=audio_only
+            audio_only=audio_only,
+            original_message_id=orig_msg_id
         )
     )
 
@@ -287,6 +326,10 @@ async def handle_playlist_callback(callback: CallbackQuery):
     except ValueError:
         max_count = 5
 
+    orig_msg_id = get_cached_message_id(cid)
+    if not orig_msg_id and callback.message and callback.message.reply_to_message:
+        orig_msg_id = callback.message.reply_to_message.message_id
+
     asyncio.create_task(
         run_playlist_task(
             chat_id=callback.message.chat.id,
@@ -294,7 +337,8 @@ async def handle_playlist_callback(callback: CallbackQuery):
             url=url,
             status_msg=callback.message,
             max_items=max_count,
-            audio_only=audio_only
+            audio_only=audio_only,
+            original_message_id=orig_msg_id
         )
     )
 
@@ -304,7 +348,8 @@ async def run_download_task(
     user_id: int,
     url: str,
     status_msg: types.Message,
-    audio_only: bool
+    audio_only: bool,
+    original_message_id: Optional[int] = None
 ):
     media: Optional[MediaInfo] = None
     action_task = None
@@ -548,8 +593,11 @@ async def run_download_task(
                     except Exception as a_err:
                         logger.warning(f"Failed to send accompanying audio: {a_err}")
 
-                # Delete status message on success
-                await status_msg.delete()
+                # Clean up status message and source link in background without blocking queue
+                to_delete = [status_msg.message_id]
+                if settings.delete_source_message and original_message_id:
+                    to_delete.append(original_message_id)
+                cleanup_messages_in_background(status_msg.bot, chat_id, to_delete)
             except Exception as send_err:
                 logger.error(f"Error sending media to chat {chat_id}: {send_err}")
                 esc_err = html.escape(str(send_err))
@@ -585,7 +633,8 @@ async def run_playlist_task(
     url: str,
     status_msg: types.Message,
     max_items: int,
-    audio_only: bool
+    audio_only: bool,
+    original_message_id: Optional[int] = None
 ):
     try:
         async with queue_manager.acquire(user_id):
@@ -673,6 +722,8 @@ async def run_playlist_task(
                 await asyncio.sleep(1.5)
 
             await update_status_safely(status_msg, f"✅ <b>Завершено!</b> Отправлено: {total_items}")
+            if settings.delete_source_message and original_message_id:
+                cleanup_messages_in_background(status_msg.bot, chat_id, [original_message_id])
 
     except ValueError:
         await update_status_safely(status_msg, "⏳ У вас уже есть активная задача загрузки.")
