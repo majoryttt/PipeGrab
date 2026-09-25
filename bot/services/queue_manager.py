@@ -38,14 +38,22 @@ class QueueManager:
     async def cleanup_old_files(self, max_age_seconds: int = 1800):
         """
         Delete files in downloads directory that are older than max_age_seconds (default 30 mins).
+        Ignores Telegram Bot API internal files (.binlog, .db, tqueue, webhooks, bot token folders).
         """
         download_dir = settings.downloads_dir
         if not download_dir.exists():
             return
 
         now = time.time()
+        ignored_extensions = {".binlog", ".db", ".sqlite", ".lock"}
+        ignored_prefixes = (".", "tqueue", "webhooks")
+
         for item in download_dir.iterdir():
-            if item.name == ".gitkeep":
+            if item.name.startswith(ignored_prefixes):
+                continue
+            if item.suffix.lower() in ignored_extensions:
+                continue
+            if ":" in item.name:  # Bot token directories/files
                 continue
             try:
                 if item.is_file():

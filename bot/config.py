@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     bot_token: str = ""
     admin_id: Optional[int] = None
     local_bot_api_url: Optional[str] = None
+    local_bot_api_server_path: str = "/var/lib/telegram-bot-api"
     telegram_proxy: Optional[str] = None
     max_file_size_mb: int = 50
     max_playlist_items: int = 20

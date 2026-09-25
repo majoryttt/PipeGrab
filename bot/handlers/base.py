@@ -1,8 +1,10 @@
+import aiofiles
 import logging
 import os
 import shutil
 import time
-from aiogram import Router, types, F
+from pathlib import Path
+from aiogram import Bot, Router, types, F
 from aiogram.filters import CommandStart, Command
 
 from bot.config import settings
@@ -101,6 +103,52 @@ async def cmd_cookies(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 
+async def download_telegram_document(bot: Bot, doc: types.Document, destination: Path) -> Path:
+    """
+    Safely download a document from Telegram.
+    Handles local Bot API path remapping, local file reading,
+    and falls back to HTTP streaming if local filesystem access fails.
+    """
+    try:
+        await bot.download(doc, destination=destination)
+        if destination.exists() and destination.stat().st_size > 0:
+            return destination
+    except Exception as e:
+        logger.warning(f"Standard bot.download failed: {e}. Attempting fallback...")
+
+    # Fallback: inspect file info returned by Bot API
+    file_info = await bot.get_file(doc.file_id)
+    if not file_info.file_path:
+        raise RuntimeError("Telegram Bot API did not return file_path")
+
+    # 1. Direct path check if it's already an existing file
+    raw_p = Path(file_info.file_path)
+    if raw_p.exists():
+        destination.write_bytes(raw_p.read_bytes())
+        return destination
+
+    # 2. Check via wrap_local_file if local Bot API is configured
+    if hasattr(bot.session.api, "wrap_local_file"):
+        local_p = Path(bot.session.api.wrap_local_file.to_local(file_info.file_path))
+        if local_p.exists():
+            destination.write_bytes(local_p.read_bytes())
+            return destination
+
+    # 3. Direct HTTP fetch fallback
+    rel_path = file_info.file_path
+    if hasattr(bot.session.api, "wrap_local_file") and hasattr(bot.session.api.wrap_local_file, "server_path"):
+        try:
+            rel_path = str(Path(file_info.file_path).relative_to(bot.session.api.wrap_local_file.server_path))
+        except Exception:
+            pass
+    url = bot.session.api.file_url(bot.token, rel_path)
+    async with bot.session.stream_content(url=url, timeout=30, chunk_size=65536) as stream:
+        async with aiofiles.open(destination, "wb") as f:
+            async for chunk in stream:
+                await f.write(chunk)
+    return destination
+
+
 @router.message(F.document)
 async def handle_document_upload(message: types.Message):
     doc = message.document
@@ -126,7 +174,7 @@ async def handle_document_upload(message: types.Message):
 
     temp_path = settings.downloads_dir / f"temp_cookies_{message.from_user.id}.txt"
     try:
-        await message.bot.download(doc, destination=temp_path)
+        await download_telegram_document(message.bot, doc, destination=temp_path)
         content = temp_path.read_text(encoding="utf-8", errors="ignore")
 
         # Validate Netscape format

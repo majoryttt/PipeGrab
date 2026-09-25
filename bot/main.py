@@ -13,6 +13,7 @@ from bot.handlers.base import router as base_router
 from bot.handlers.download import router as download_router
 from bot.services.queue_manager import queue_manager
 from bot.services.http_client import http_client
+from bot.services.path_wrapper import LocalFilesPathWrapper
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +34,14 @@ def build_bot() -> Bot:
 
     if settings.local_bot_api_url:
         logger.info(f"Connecting to Local Telegram Bot API Server at: {settings.local_bot_api_url}")
-        server = TelegramAPIServer.from_base(settings.local_bot_api_url, is_local=True)
+        server = TelegramAPIServer.from_base(
+            settings.local_bot_api_url,
+            is_local=True,
+            wrap_local_file=LocalFilesPathWrapper(
+                server_path=settings.local_bot_api_server_path,
+                local_path=settings.downloads_dir.resolve(),
+            ),
+        )
         session = AiohttpSession(api=server, proxy=settings.telegram_proxy)
         return Bot(token=settings.bot_token, session=session, default=default_properties)
     elif settings.telegram_proxy:
