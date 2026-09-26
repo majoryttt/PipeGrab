@@ -70,6 +70,63 @@ def get_highest_res_thumbnail(thumbnails: List[Dict[str, Any]]) -> Optional[str]
     return sorted_thumbs[0]["url"]
 
 
+def select_best_video_format(formats: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    Select the best video format URL, prioritizing formats that include an audio track.
+    Avoids selecting video-only DASH formats (where acodec is 'none') unless no other format exists.
+    """
+    if not formats:
+        return None
+
+    def _is_video(f: Dict[str, Any]) -> bool:
+        if not f.get("url"):
+            return False
+        if f.get("vcodec") == "none":
+            return False
+        ext = (f.get("ext") or "").lower()
+        video_ext = (f.get("video_ext") or "").lower()
+        url = f.get("url") or ""
+        return (
+            ext in ["mp4", "mkv", "webm", "mov"]
+            or video_ext in ["mp4", "mkv", "webm", "mov"]
+            or ".mp4" in url
+            or f.get("vcodec") is not None
+        )
+
+    # 1. Prefer formats with audio (acodec != 'none')
+    formats_with_audio = [
+        f for f in formats
+        if _is_video(f) and f.get("acodec") != "none"
+    ]
+    if formats_with_audio:
+        sorted_audio_fmts = sorted(
+            formats_with_audio,
+            key=lambda f: (
+                (f.get("width") or 0) * (f.get("height") or 0),
+                f.get("tbr") or 0,
+                f.get("filesize") or 0
+            ),
+            reverse=True
+        )
+        return sorted_audio_fmts[0]["url"]
+
+    # 2. Fallback to any video format if no audio-containing format exists
+    video_formats = [f for f in formats if _is_video(f)]
+    if video_formats:
+        sorted_fmts = sorted(
+            video_formats,
+            key=lambda f: (
+                (f.get("width") or 0) * (f.get("height") or 0),
+                f.get("tbr") or 0,
+                f.get("filesize") or 0
+            ),
+            reverse=True
+        )
+        return sorted_fmts[0]["url"]
+
+    return None
+
+
 @dataclass
 class InstagramItem:
     media_type: str  # 'photo' or 'video'
@@ -233,12 +290,16 @@ class InstagramService:
                     if not entry:
                         continue
                     formats = entry.get("formats") or []
-                    video_formats = [f for f in formats if f.get("vcodec") and f.get("vcodec") != "none"]
-                    if video_formats:
+                    video_url = select_best_video_format(formats)
+                    if not video_url and entry.get("url") and (
+                        (entry.get("ext") or "").lower() in ["mp4", "mov", "mkv", "webm"]
+                        or (entry.get("video_ext") or "").lower() in ["mp4", "mov", "mkv", "webm"]
+                    ):
+                        video_url = entry.get("url")
+
+                    if video_url:
                         # Video item in carousel
-                        video_url = video_formats[-1].get("url")
-                        if video_url:
-                            items.append(InstagramItem(media_type="video", url=video_url))
+                        items.append(InstagramItem(media_type="video", url=video_url))
                     else:
                         # Photo item in carousel
                         img_url = get_highest_res_thumbnail(entry.get("thumbnails", []))
@@ -258,9 +319,14 @@ class InstagramService:
 
             # Single item
             formats = info.get("formats") or []
-            video_formats = [f for f in formats if f.get("vcodec") and f.get("vcodec") != "none"]
-            if video_formats:
-                best_video_url = video_formats[-1].get("url")
+            best_video_url = select_best_video_format(formats)
+            if not best_video_url and info.get("url") and (
+                (info.get("ext") or "").lower() in ["mp4", "mov", "mkv", "webm"]
+                or (info.get("video_ext") or "").lower() in ["mp4", "mov", "mkv", "webm"]
+            ):
+                best_video_url = info.get("url")
+
+            if best_video_url:
                 duration = int(info.get("duration") or 0)
                 return InstagramData(
                     url=url,

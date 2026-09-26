@@ -171,17 +171,3 @@ Instagram строго запрещает анонимный просмотр и
 
 **Альтернативный способ:**
 Положите файл `cookies.txt` вручную на сервере в папку `data/cookies/cookies.txt`.
-
----
-
-## 🧪 Запуск тестов
-
-Локально:
-```bash
-pytest -v tests/
-```
-
-В Docker:
-```bash
-docker run --rm -v $(pwd):/app pipegrab-bot:latest pytest
-```

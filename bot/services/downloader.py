@@ -407,35 +407,44 @@ class DownloaderService:
         # 3. Specialized Instagram handler for photos, albums, and stories
         if platform == Platform.INSTAGRAM and not audio_only:
             try:
-                ig_data = await instagram_service.extract_data(url)
-                if ig_data and ig_data.error_message:
-                    return MediaInfo(
-                        title=ig_data.title,
-                        duration=0,
-                        uploader=ig_data.uploader,
-                        is_playlist=False,
-                        playlist_count=0,
-                        platform=Platform.INSTAGRAM,
-                        url=url,
-                        error_message=ig_data.error_message
-                    )
-                if ig_data and ig_data.items:
-                    files, final_type = await instagram_service.download_media(ig_data, self.download_dir)
-                    if files:
-                        total_size = sum(f.stat().st_size for f in files if f.exists())
+                is_story = "/stories/" in url
+                is_known_single_video = "/reel/" in url or "/tv/" in url
+
+                # For known single videos/reels: do not intercept with direct download,
+                # let yt-dlp (Step 4) download and merge bestvideo+bestaudio with ffmpeg.
+                if not is_known_single_video:
+                    ig_data = await instagram_service.extract_data(url)
+                    if ig_data and ig_data.error_message:
                         return MediaInfo(
                             title=ig_data.title,
-                            duration=ig_data.duration,
+                            duration=0,
                             uploader=ig_data.uploader,
                             is_playlist=False,
                             playlist_count=0,
                             platform=Platform.INSTAGRAM,
                             url=url,
-                            media_type=MediaType(final_type),
-                            file_path=files[0],
-                            file_paths=files,
-                            file_size=total_size
+                            error_message=ig_data.error_message
                         )
+                    # For stories, photos, and albums (carousels): download directly via instagram_service
+                    # If it's a single video post (/p/), let it fall through to yt-dlp (Step 4)
+                    if ig_data and ig_data.items:
+                        if is_story or ig_data.media_type in ["photo", "album"]:
+                            files, final_type = await instagram_service.download_media(ig_data, self.download_dir)
+                            if files:
+                                total_size = sum(f.stat().st_size for f in files if f.exists())
+                                return MediaInfo(
+                                    title=ig_data.title,
+                                    duration=ig_data.duration,
+                                    uploader=ig_data.uploader,
+                                    is_playlist=False,
+                                    playlist_count=0,
+                                    platform=Platform.INSTAGRAM,
+                                    url=url,
+                                    media_type=MediaType(final_type),
+                                    file_path=files[0],
+                                    file_paths=files,
+                                    file_size=total_size
+                                )
             except Exception as ie:
                 logger.warning(f"Instagram direct download failed for {url}: {ie}")
 
