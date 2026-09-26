@@ -1,66 +1,68 @@
 # 🤖 PipeGrab — Telegram Media Downloader Bot
 
-Асинхронный Telegram-бот для мгновенного скачивания видео, аудио, фото и альбомов в высоком качестве с популярных видеохостингов и социальных сетей.
+An asynchronous Telegram bot for instantly downloading high-quality videos, audio, photos, and albums from popular video hosting platforms and social networks.
 
-## 🚀 Поддерживаемые платформы
-- **YouTube**: обычные видео, Shorts, аудио (MP3) и плейлисты (выбор: видео или MP3).
-- **TikTok**: видео без водяных знаков (прямой CDN fast-path), а также **фото-слайдшоу (Photo Mode)** с отправкой фото альбомом и музыки отдельным аудиофайлом.
-- **Instagram**: Reels, видео-посты, **одиночные фото**, **фото-карусели и альбомы**, а также **истории (Stories)** (через cookies).
-- **Twitter / X**: видео и клипы.
-- **Pinterest**: фото в оригинальном качестве, альбомы/карусели (Idea Pins), GIF-анимации, видео и доски.
+*Read this in other languages: [Русский](README_RU.md)*
 
----
-
-## ✨ Возможности
-- **Максимальная скорость работы (Fast-Path)**:
-  - Однопроходная обработка (Single-pass): бот начинает скачивание мгновенно без двойных предварительных запросов метаданных.
-  - Прямой стриминг TikTok без водяных знаков напрямую из CDN за доли секунды без лишней нагрузки на FFmpeg.
-  - Параллельная загрузка альбомов, каруселей и историй через `asyncio.gather`.
-  - Пул постоянных HTTP-соединений с Keep-Alive и кэшированием DNS.
-- **Умное определение ссылок**: достаточно просто отправить ссылку в чат (поддерживаются и короткие ссылки, такие как `vt.tiktok.com`, `pin.it`, `youtu.be`).
-- **Автоудаление ссылок для чистоты чата**:
-  - После успешной отправки медиафайла бот автоматически удаляет сообщение пользователя со ссылкой и своё статусное сообщение (одним пакетным запросом без задержки).
-  - Если скачивание завершилось ошибкой, ссылка сохраняется для удобства редактирования.
-  - Настраивается через `DELETE_SOURCE_MESSAGE` в `.env`.
-- **Полная поддержка TikTok**:
-  - Скачивание видео в оригинальном качестве без водяного знака.
-  - Поддержка фото-постов (`/photo/`): бот выгружает все оригинальные фотографии в медиагруппу Telegram и отдельно отправляет прикрепленный трек.
-- **Полная поддержка Instagram**:
-  - Скачивание видеороликов и Reels в исходном качестве.
-  - Скачивание одиночных фотографий и каруселей (альбомов) в высоком разрешении.
-  - Истории (Stories) при подключении cookies.
-- **Полная поддержка Pinterest**:
-  - Фото скачиваются в оригинальном разрешении (без сжатия превью).
-  - Альбомы и карусели (Idea Pins) отправляются аккуратной медиагруппой Telegram (до 10 фото в группе).
-  - Анимированные GIF отправляются как зацикленные анимации Telegram.
-  - Видео скачиваются со звуком в высоком качестве.
-- **Выбор формата**: для YouTube доступен интерактивный выбор между скачиванием видео и аудио (MP3).
-- **Поддержка плейлистов и досок**: выбор количества элементов (5, 10, 20 или все) с последовательной безопасной отправкой без блокировок.
-- **Индикатор прогресса**: отображение полосы загрузки (`[████░░░░░░] 45%`), скорости скачивания и ETA в реальном времени, а также нативный индикатор отправки в Telegram.
-- **Удобное управление Cookies**:
-  - Можно отправить файл `cookies.txt` прямо в чат Telegram — бот проверит формат и мгновенно подключит его без перезапуска!
-  - Защита администратором: только владелец бота (`ADMIN_ID`) может обновлять cookies.
-  - Совместимость с Local Bot API контейнером через автоматический маппинг путей.
-- **Поддержка файлов до 2 ГБ**: работает со стандартным Bot API (до 50 МБ) и с Local Telegram Bot API Server (до 2000 МБ).
-- **Защита от перегрузки**: очередь задач, семафор параллельных загрузок и лимит на 1 активную задачу на пользователя.
-- **Автоматическая очистка**: скачанные временные файлы гарантированно удаляются после отправки. Фоновый очиститель защищает системные бинлоги Bot API.
+## 🚀 Supported Platforms
+- **YouTube**: Regular videos, Shorts, audio (MP3), and playlists (with interactive video vs MP3 selection).
+- **TikTok**: Watermark-free videos (direct CDN fast-path), as well as **photo slideshows (Photo Mode)** sent as a Telegram media group with background music as a separate audio file.
+- **Instagram**: Reels, video posts, **single photos**, **photo carousels and albums**, and **Stories** (via cookies).
+- **Twitter / X**: Videos and clips.
+- **Pinterest**: Original quality photos, albums/carousels (Idea Pins), animated GIFs, videos, and boards.
 
 ---
 
-## 📋 Команды бота
+## ✨ Features
+- **Maximum Speed (Fast-Path)**:
+  - Single-pass processing: the bot begins downloading immediately without redundant metadata pre-fetches.
+  - Direct watermark-free TikTok streaming straight from CDN in fractions of a second with zero FFmpeg overhead.
+  - Parallel downloading of albums, carousels, and stories via `asyncio.gather`.
+  - Persistent HTTP connection pool with Keep-Alive and DNS caching.
+- **Smart Link Detection**: Simply send a link to the chat (shortened URLs like `vt.tiktok.com`, `pin.it`, `youtu.be` are fully supported).
+- **Auto-Delete Source Link for Chat Cleanliness**:
+  - Automatically deletes the user's message with the link and the bot's status message after successful delivery (in a single batch call with zero delay).
+  - If the download fails, the link message is preserved for easy editing.
+  - Configurable via `DELETE_SOURCE_MESSAGE` in `.env`.
+- **Full TikTok Support**:
+  - Original quality video downloads without watermarks.
+  - Photo post support (`/photo/`): extracts all original high-resolution photos into a Telegram media group and attaches the audio track separately.
+- **Full Instagram Support**:
+  - Downloads videos and Reels in original quality with audio.
+  - High-resolution single photos and carousel albums.
+  - Stories support when cookies are provided.
+- **Full Pinterest Support**:
+  - Photos downloaded at maximum original resolution (no preview compression).
+  - Albums and carousels (Idea Pins) sent as a neat Telegram media group (up to 10 photos per group).
+  - Animated GIFs delivered as native looped Telegram animations.
+  - High-quality videos downloaded with sound.
+- **Format Selection**: Interactive selection between video and audio (MP3) downloads for YouTube.
+- **Playlist and Board Support**: Select the number of items (5, 10, 20, or all) with sequential, safe rate-limited delivery.
+- **Progress Tracking**: Real-time progress bar (`[████░░░░░░] 45%`), download speed, and ETA, along with native Telegram upload actions.
+- **Seamless Cookie Management**:
+  - Send a `cookies.txt` file directly to the bot in Telegram — it validates the format and applies it instantly without requiring a restart!
+  - Admin-only protection: only the bot owner (`ADMIN_ID`) can upload cookies.
+  - Compatible with Local Bot API server through automatic path mapping.
+- **Support for Files up to 2 GB**: Works with standard Telegram Bot API (up to 50 MB) and Local Telegram Bot API Server (up to 2000 MB).
+- **Overload Protection**: Task queue, concurrent download semaphore, and a limit of 1 active download task per user.
+- **Automatic Cleanup**: Downloaded temporary files are reliably deleted after sending. A background cleaner prevents Local Bot API binlog buildup.
 
-| Команда | Описание |
+---
+
+## 📋 Bot Commands
+
+| Command | Description |
 | :--- | :--- |
-| `/start` | Приветствие и список поддерживаемых сервисов |
-| `/help` | Подробная инструкция по использованию бота |
-| `/cookies` | Статус подключенных cookies и распознанные авторизации |
-| `/status` | Системный статус (режим API, лимиты, свободное место на диске, активные загрузки) |
+| `/start` | Welcome message and list of supported services |
+| `/help` | Detailed guide on how to use the bot |
+| `/cookies` | Status of active cookies and detected authentications |
+| `/status` | System status (API mode, file limits, free disk space, active downloads) |
 
 ---
 
-## 🛠️ Быстрый старт локально
+## 🛠️ Local Quick Start
 
-### 1. Клонирование и создание окружения
+### 1. Clone and Set Up Virtual Environment
 ```bash
 git clone https://github.com/majoryttt/PipeGrab
 cd PipeGrab
@@ -70,20 +72,20 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Настройка переменных окружения
-Скопируйте файл конфигурации:
+### 2. Configure Environment Variables
+Copy the example configuration:
 ```bash
 cp .env.example .env
 ```
-Откройте `.env` и укажите ваш токен от [@BotFather](https://t.me/BotFather):
+Open `.env` and fill in your bot token from [@BotFather](https://t.me/BotFather):
 ```env
 BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
-ADMIN_ID=123456789             # Ваш Telegram ID для ограничения загрузки cookies
-DELETE_SOURCE_MESSAGE=true     # Автоудаление сообщения со ссылкой после скачивания
+ADMIN_ID=123456789             # Your Telegram user ID to restrict cookie uploads
+DELETE_SOURCE_MESSAGE=true     # Auto-delete source link message after download
 ```
 
-### 3. Убедитесь в наличии ffmpeg
-В системе должен быть установлен `ffmpeg`:
+### 3. Ensure FFmpeg is Installed
+`ffmpeg` must be installed on your system:
 ```bash
 # Ubuntu / Debian
 sudo apt update && sudo apt install -y ffmpeg
@@ -95,79 +97,79 @@ sudo pacman -S ffmpeg
 brew install ffmpeg
 ```
 
-### 4. Запуск бота
+### 4. Run the Bot
 ```bash
 python3 -m bot.main
 ```
 
 ---
 
-## 🐳 Развертывание на сервере через Docker Compose
+## 🐳 Deployment with Docker Compose
 
-Это рекомендуемый способ для работы 24/7. Все системные зависимости (`ffmpeg`, `python`) уже упакованы в контейнер.
+This is the recommended way to run PipeGrab 24/7. All system dependencies (`ffmpeg`, `python`) are pre-packaged in the container.
 
-### 1. Перенос на сервер
-Склонируйте проект на ваш Linux-сервер:
+### 1. Set Up on Server
+Clone the repository to your Linux server:
 ```bash
 git clone https://github.com/majoryttt/PipeGrab
 cd PipeGrab
 cp .env.example .env
-nano .env  # Вставьте ваш BOT_TOKEN и ADMIN_ID
+nano .env  # Enter your BOT_TOKEN and ADMIN_ID
 ```
 
-### 2. Запуск контейнера
+### 2. Start Containers
 ```bash
 docker compose up -d --build
 ```
 
-### 3. Полезные команды
-- Просмотр логов в реальном времени:
+### 3. Useful Commands
+- View live logs:
   ```bash
   docker compose logs -f bot
   ```
-- Перезапуск бота:
+- Restart the bot:
   ```bash
   docker compose restart bot
   ```
-- Остановка:
+- Stop containers:
   ```bash
   docker compose down
   ```
 
 ---
 
-## ⚡ Отправка больших видео до 2 ГБ (Local Bot API)
+## ⚡ Sending Large Files up to 2 GB (Local Bot API)
 
-Стандартный Telegram Bot API ограничивает размер отправляемых ботом файлов до 50 МБ.
-Если вы хотите отправлять большие видео (до 2 ГБ), запустите встроенный локальный сервер Bot API:
+The standard Telegram Bot API restricts bot uploads to 50 MB.
+If you want to send large videos (up to 2 GB), run the built-in Local Bot API server:
 
-1. Перейдите на [my.telegram.org](https://my.telegram.org), войдите и создайте приложение (App configuration), чтобы получить `api_id` и `api_hash`.
-2. Откройте `docker-compose.yml` и раскомментируйте блок сервиса `telegram-bot-api` и строку `depends_on`.
-3. В файле `.env` укажите:
+1. Go to [my.telegram.org](https://my.telegram.org), log in, and create an application (under *App configuration*) to obtain your `api_id` and `api_hash`.
+2. Open `docker-compose.yml` and uncomment the `telegram-bot-api` service block and the `depends_on` directive.
+3. In your `.env` file, specify:
    ```env
    LOCAL_BOT_API_URL=http://telegram-bot-api:8081
    MAX_FILE_SIZE_MB=2000
-   TELEGRAM_API_ID=ваш_api_id
-   TELEGRAM_API_HASH=ваш_api_hash
+   TELEGRAM_API_ID=your_api_id
+   TELEGRAM_API_HASH=your_api_hash
    ```
-4. Перезапустите стек:
+4. Restart the stack:
    ```bash
    docker compose up -d --build
    ```
 
 ---
 
-## 🍪 Настройка Cookies (для историй Instagram и YouTube)
+## 🍪 Configuring Cookies (for Instagram Stories & YouTube)
 
-Instagram строго запрещает анонимный просмотр историй и некоторых публикаций. Также cookies помогают обходить проверки роботов на YouTube.
+Instagram restricts viewing Stories and certain posts without authentication. Cookies also help prevent bot verification challenges on YouTube.
 
-**Самый простой способ:**
-1. Установите расширение для браузера Chrome/Firefox (например, *Get cookies.txt LOCALLY* или *Cookie-Editor*).
-2. Войдите в свой Instagram или YouTube в браузере.
-3. Экспортируйте куки в формате **Netscape** (получится файл `cookies.txt`).
-4. **Просто перетащите или отправьте файл `cookies.txt` прямо боту в Telegram как документ!**
-   - Бот сам проверит файл, сохранит его и активирует доступ к историям без перезапуска.
-   - Проверить статус cookies в любой момент можно командой `/cookies`.
+**The easiest method:**
+1. Install a browser extension for Chrome or Firefox (e.g., *Get cookies.txt LOCALLY* or *Cookie-Editor*).
+2. Log into Instagram or YouTube in your browser.
+3. Export cookies in **Netscape** format (saving as `cookies.txt`).
+4. **Simply drag and drop or send the `cookies.txt` file directly to the bot in Telegram as a document!**
+   - The bot validates the file, saves it, and enables access to Stories immediately without restarting.
+   - You can check the cookie status at any time with `/cookies`.
 
-**Альтернативный способ:**
-Положите файл `cookies.txt` вручную на сервере в папку `data/cookies/cookies.txt`.
+**Alternative method:**
+Place `cookies.txt` manually on your server at `data/cookies/cookies.txt`.
