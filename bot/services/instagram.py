@@ -49,6 +49,34 @@ def parse_instagram_story_url(url: str) -> Tuple[Optional[str], Optional[str]]:
     return user, story_id
 
 
+def clean_instagram_url(url: str) -> str:
+    """
+    Clean and normalize Instagram URL:
+    - Strips tracking tokens (?stkn=..., ?igsh=..., ?utm_source=...)
+    - Normalizes /reel/, /p/, /tv/, /stories/
+    """
+    match_story = re.search(r'instagram\.com/stories/(?:highlights/(\d+)|([^/?#&]+)(?:/(\d+))?)', url)
+    if match_story:
+        hl_id, user, story_id = match_story.groups()
+        if hl_id:
+            return f"https://www.instagram.com/stories/highlights/{hl_id}/"
+        if story_id:
+            return f"https://www.instagram.com/stories/{user}/{story_id}/"
+        return f"https://www.instagram.com/stories/{user}/"
+
+    match_post = re.search(r'instagram\.com/(?:p|reel|tv|share)/([^/?#&]+)', url)
+    if match_post:
+        shortcode = match_post.group(1)
+        if "/reel/" in url:
+            return f"https://www.instagram.com/reel/{shortcode}/"
+        elif "/tv/" in url:
+            return f"https://www.instagram.com/tv/{shortcode}/"
+        else:
+            return f"https://www.instagram.com/p/{shortcode}/"
+
+    return url.split("?")[0]
+
+
 def extract_shortcode(url: str) -> Optional[str]:
     match = re.search(r'/(?:p|reel|tv|stories|share)/([^/?#&]+)', url)
     return match.group(1) if match else None
@@ -151,12 +179,15 @@ class InstagramService:
     def __init__(self):
         self.headers = INSTAGRAM_HEADERS
 
-    async def _extract_story_via_gallery_dl(self, url: str) -> Optional[InstagramData]:
-        """Extract Instagram story using gallery-dl with cookies."""
+    async def _extract_via_gallery_dl(self, url: str) -> Optional[InstagramData]:
+        """Extract Instagram post/reel/story/album using gallery-dl with cookies."""
         import subprocess
         import json
 
-        user, target_story_id = parse_instagram_story_url(url)
+        url = clean_instagram_url(url)
+        is_story = "/stories/" in url
+        story_user, story_id = parse_instagram_story_url(url) if is_story else (None, None)
+        shortcode = extract_shortcode(url) or "instagram_media"
 
         def _run():
             try:
@@ -167,29 +198,43 @@ class InstagramService:
                 res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 if res.returncode != 0:
                     err_str = (res.stderr or "").lower()
-                    if any(t in err_str for t in ["auth", "login", "cookie", "not found"]):
+                    if any(t in err_str for t in ["auth", "login", "cookie", "not found", "redirect to login"]):
                         return "AUTH_REQUIRED"
                     return None
                 entries = json.loads(res.stdout) if res.stdout else []
                 items: List[InstagramItem] = []
-                uploader = user or "Instagram User"
-                title = f"История @{uploader}" if not target_story_id else f"История @{uploader} ({target_story_id})"
+                uploader = story_user or "Instagram User"
+                title = f"История @{uploader}" if is_story else f"Instagram @{uploader}"
                 duration = 0
 
                 for item in entries:
                     code = item[0]
                     if code == -1 and isinstance(item[1], dict):
                         msg = item[1].get("message", "").lower()
-                        if any(t in msg for t in ["auth", "login", "cookie", "not found"]):
+                        if any(t in msg for t in ["auth", "login", "cookie", "not found", "redirect to login"]):
                             return "AUTH_REQUIRED"
                     elif code == 2 and isinstance(item[1], dict):
                         d = item[1]
                         uploader = d.get("user", {}).get("username") or d.get("username") or uploader
+                        caption = d.get("caption") or d.get("description") or ""
+                        if caption:
+                            clean_caption = caption.strip()
+                            title = clean_caption[:77] + "..." if len(clean_caption) > 80 else clean_caption
+                        elif is_story:
+                            title = f"История @{uploader}" if not story_id else f"История @{uploader} ({story_id})"
                     elif code == 3 and isinstance(item[1], str):
                         media_url = item[1]
                         meta = item[2] if len(item) > 2 and isinstance(item[2], dict) else {}
+                        # If gallery-dl gave a ytdl: URL, get the direct progressive fallback URL from meta
+                        if media_url.startswith("ytdl:"):
+                            fallback = meta.get("_fallback")
+                            if fallback and len(fallback) > 0:
+                                media_url = fallback[0]
+                            elif meta.get("video_url"):
+                                media_url = meta.get("video_url")
+
                         ext = (meta.get("extension") or "").lower()
-                        is_video = ext in ["mp4", "mov", "mkv"] or ".mp4" in media_url
+                        is_video = ext in ["mp4", "mov", "mkv", "webm"] or ".mp4" in media_url or bool(meta.get("video_url"))
                         m_type = "video" if is_video else "photo"
                         w = int(meta.get("width") or 0)
                         h = int(meta.get("height") or 0)
@@ -202,7 +247,7 @@ class InstagramService:
                     final_media_type = "album" if len(items) > 1 else items[0].media_type
                     return InstagramData(
                         url=url,
-                        shortcode=target_story_id or user or "story",
+                        shortcode=story_id or story_user or shortcode if is_story else shortcode,
                         title=title,
                         uploader=uploader,
                         media_type=final_media_type,
@@ -210,25 +255,34 @@ class InstagramService:
                         duration=duration
                     )
             except Exception as e:
-                logger.warning(f"gallery-dl story extraction failed for {url}: {e}")
+                logger.warning(f"gallery-dl extraction failed for {url}: {e}")
             return None
 
-        result = await asyncio.to_thread(_run)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, _run)
         if result == "AUTH_REQUIRED":
+            err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else "AUTH_REQUIRED_INSTAGRAM"
             return InstagramData(
                 url=url,
-                shortcode=target_story_id or user or "story",
-                title="Instagram Story",
+                shortcode=story_id or story_user or shortcode if is_story else shortcode,
+                title="Instagram Media",
                 uploader="Instagram",
                 media_type="video",
-                error_message="AUTH_REQUIRED_INSTAGRAM_STORY"
+                error_message=err_code
             )
-        return result
+        if isinstance(result, InstagramData):
+            return result
+        return None
+
+    async def _extract_story_via_gallery_dl(self, url: str) -> Optional[InstagramData]:
+        """Extract Instagram story using gallery-dl with cookies."""
+        return await self._extract_via_gallery_dl(url)
 
     async def extract_data(self, url: str) -> Optional[InstagramData]:
         """
         Extract Instagram post/reel/story metadata supporting photos, albums, and videos.
         """
+        url = clean_instagram_url(url)
         shortcode = extract_shortcode(url) or "instagram_media"
         is_story = "/stories/" in url
         story_user, story_id = parse_instagram_story_url(url) if is_story else (None, None)
@@ -244,13 +298,13 @@ class InstagramService:
                 error_message="AUTH_REQUIRED_INSTAGRAM_STORY"
             )
 
-        # For Instagram Stories with cookies, try gallery-dl first
+        # 1. Primary extractor for stories with cookies: gallery-dl
         if is_story:
             g_story = await self._extract_story_via_gallery_dl(url)
             if g_story:
                 return g_story
 
-        # 1. Primary extractor: yt-dlp with ignore_no_formats_error=True
+        # 2. Primary extractor for posts/reels: yt-dlp with ignore_no_formats_error=True
         def _extract_ydl():
             opts: Dict[str, Any] = {
                 "quiet": True,
@@ -350,7 +404,13 @@ class InstagramService:
                         items=[InstagramItem(media_type="photo", url=img_url)]
                     )
 
-        # 2. Fallback: Instagram public embed extraction for posts without cookies
+        # 3. Fallback when yt-dlp fails: gallery-dl if cookies available
+        if settings.has_cookies:
+            g_data = await self._extract_via_gallery_dl(url)
+            if g_data:
+                return g_data
+
+        # 4. Fallback: Instagram public embed extraction for posts without cookies
         if "/p/" in url or "/reel/" in url:
             try:
                 embed_data = await self._extract_from_embed(url)
@@ -359,7 +419,7 @@ class InstagramService:
             except Exception as e:
                 logger.warning(f"Instagram embed fallback failed for {url}: {e}")
 
-        # Check for authentication errors
+        # Check for authentication or blocking errors
         if ydl_error:
             err_str = str(ydl_error).lower()
             if any(term in err_str for term in [
@@ -369,7 +429,11 @@ class InstagramService:
                 "redirected to the login page",
                 "this content is unreachable",
                 "you need to log in",
-                "use --cookies"
+                "use --cookies",
+                "http error 400",
+                "video info extraction failed",
+                "not granting access",
+                "empty media response",
             ]):
                 err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else "AUTH_REQUIRED_INSTAGRAM"
                 return InstagramData(
@@ -391,6 +455,7 @@ class InstagramService:
                 )
 
         return None
+
 
     async def _extract_from_embed(self, url: str) -> Optional[InstagramData]:
         """Extract public Instagram post media from the embed endpoint."""

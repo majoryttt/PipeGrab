@@ -15,7 +15,7 @@ from bot.config import settings
 from bot.services.ffmpeg_utils import get_video_metadata, generate_thumbnail
 from bot.services.pinterest import pinterest_service, is_pinterest_url
 from bot.services.tiktok import tiktok_service, is_tiktok_url, resolve_tiktok_url
-from bot.services.instagram import instagram_service, is_instagram_url
+from bot.services.instagram import instagram_service, is_instagram_url, clean_instagram_url
 from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
@@ -166,6 +166,8 @@ class DownloaderService:
             return cached
 
         platform = detect_platform(url)
+        if platform == Platform.INSTAGRAM:
+            url = clean_instagram_url(url)
 
         # 1. Specialized Pinterest handler (handles images, albums, gifs, videos, and boards)
         if platform == Platform.PINTEREST:
@@ -339,6 +341,8 @@ class DownloaderService:
         Download media (video, audio, photo, gif, album) and return MediaInfo with file path(s).
         """
         platform = detect_platform(url)
+        if platform == Platform.INSTAGRAM:
+            url = clean_instagram_url(url)
 
         # 1. Specialized Pinterest handler for photos, gifs, and albums
         if platform == Platform.PINTEREST:
@@ -404,34 +408,37 @@ class DownloaderService:
             except Exception as te:
                 logger.warning(f"TikTok direct download failed for {url}: {te}")
 
-        # 3. Specialized Instagram handler for photos, albums, and stories
+        # 3. Specialized Instagram handler for photos, albums, reels, and stories
         if platform == Platform.INSTAGRAM and not audio_only:
             try:
-                is_story = "/stories/" in url
                 is_known_single_video = "/reel/" in url or "/tv/" in url
+                # If cookies are present, always extract via instagram_service (gallery-dl with cookies handles reels with audio)
+                # If no cookies, do not intercept single videos/reels: let yt-dlp (Step 4) merge bestvideo+bestaudio
+                should_handle_via_service = settings.has_cookies or not is_known_single_video
 
-                # For known single videos/reels: do not intercept with direct download,
-                # let yt-dlp (Step 4) download and merge bestvideo+bestaudio with ffmpeg.
-                if not is_known_single_video:
+                if should_handle_via_service:
                     ig_data = await instagram_service.extract_data(url)
-                    if ig_data and ig_data.error_message:
-                        return MediaInfo(
-                            title=ig_data.title,
-                            duration=0,
-                            uploader=ig_data.uploader,
-                            is_playlist=False,
-                            playlist_count=0,
-                            platform=Platform.INSTAGRAM,
-                            url=url,
-                            error_message=ig_data.error_message
-                        )
-                    # For stories, photos, and albums (carousels): download directly via instagram_service
-                    # If it's a single video post (/p/), let it fall through to yt-dlp (Step 4)
-                    if ig_data and ig_data.items:
-                        if is_story or ig_data.media_type in ["photo", "album"]:
+                    if ig_data:
+                        if ig_data.error_message:
+                            return MediaInfo(
+                                title=ig_data.title,
+                                duration=0,
+                                uploader=ig_data.uploader,
+                                is_playlist=False,
+                                playlist_count=0,
+                                platform=Platform.INSTAGRAM,
+                                url=url,
+                                error_message=ig_data.error_message
+                            )
+                        if ig_data.items:
                             files, final_type = await instagram_service.download_media(ig_data, self.download_dir)
                             if files:
                                 total_size = sum(f.stat().st_size for f in files if f.exists())
+                                thumb_path = None
+                                if final_type == "video" and files[0].exists():
+                                    candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
+                                    thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
+
                                 return MediaInfo(
                                     title=ig_data.title,
                                     duration=ig_data.duration,
@@ -443,7 +450,8 @@ class DownloaderService:
                                     media_type=MediaType(final_type),
                                     file_path=files[0],
                                     file_paths=files,
-                                    file_size=total_size
+                                    file_size=total_size,
+                                    thumbnail_path=thumb_path
                                 )
             except Exception as ie:
                 logger.warning(f"Instagram direct download failed for {url}: {ie}")
