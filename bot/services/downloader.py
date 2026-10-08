@@ -344,11 +344,11 @@ class DownloaderService:
         if platform == Platform.INSTAGRAM:
             url = clean_instagram_url(url)
 
-        # 1. Specialized Pinterest handler for photos, gifs, and albums
+        # 1. Specialized Pinterest handler for photos, gifs, albums, and videos
         if platform == Platform.PINTEREST:
             try:
                 pin_data = await pinterest_service.extract_data(url)
-                if pin_data and pin_data.media_type in ["photo", "album", "animation"]:
+                if pin_data and pin_data.media_type in ["photo", "album", "animation", "video"]:
                     files, final_type = await pinterest_service.download_pin(
                         pin_data,
                         self.download_dir,
@@ -356,9 +356,14 @@ class DownloaderService:
                     )
                     if files:
                         total_size = sum(f.stat().st_size for f in files if f.exists())
+                        thumb_path = None
+                        if final_type == "video" and files[0].exists():
+                            candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
+                            thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
+
                         return MediaInfo(
                             title=pin_data.title,
-                            duration=0,
+                            duration=pin_data.duration,
                             uploader=pin_data.uploader,
                             is_playlist=False,
                             playlist_count=0,
@@ -367,7 +372,8 @@ class DownloaderService:
                             media_type=MediaType(final_type),
                             file_path=files[0],
                             file_paths=files,
-                            file_size=total_size
+                            file_size=total_size,
+                            thumbnail_path=thumb_path
                         )
             except Exception as pe:
                 logger.warning(f"Pinterest direct download failed for {url}: {pe}")
@@ -618,6 +624,11 @@ class DownloaderService:
                     if pin_data:
                         files, final_type = await pinterest_service.download_pin(pin_data, self.download_dir)
                         if files:
+                            thumb_path = None
+                            if final_type == "video" and files[0].exists():
+                                candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
+                                thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
+
                             return MediaInfo(
                                 title=pin_data.title,
                                 duration=pin_data.duration,
@@ -629,7 +640,8 @@ class DownloaderService:
                                 media_type=MediaType(final_type),
                                 file_path=files[0],
                                 file_paths=files,
-                                file_size=sum(f.stat().st_size for f in files)
+                                file_size=sum(f.stat().st_size for f in files),
+                                thumbnail_path=thumb_path
                             )
                 except Exception as pe:
                     logger.error(f"Pinterest fallback download failed: {pe}")

@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -90,11 +91,119 @@ class PinterestService:
     def __init__(self):
         self.headers = PINTEREST_HEADERS
 
-    async def extract_data(self, url: str) -> Optional[PinterestData]:
+    def _extract_with_gallery_dl(self, target_url: str) -> Optional[PinterestData]:
         """
-        Extract metadata from a Pinterest pin or board URL.
+        Extract Pinterest pin or board metadata using gallery-dl.
+        Returns PinterestData if successful, None otherwise.
         """
-        resolved_url = await resolve_pinterest_url(url)
+        try:
+            cmd = ["gallery-dl", "-j", target_url]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+            if res.returncode != 0 or not res.stdout.strip():
+                logger.debug(f"gallery-dl returned {res.returncode} for {target_url}: {res.stderr}")
+                return None
+
+            data = json.loads(res.stdout)
+            if not isinstance(data, list) or not data:
+                return None
+
+            pin_id = ""
+            title = "Pinterest Media"
+            uploader = "Pinterest"
+            image_urls: List[str] = []
+            video_url = None
+            board_pin_urls: List[str] = []
+
+            # Check if this was a board or multi-pin feed
+            directories = [
+                item[1] for item in data
+                if isinstance(item, list) and len(item) >= 2 and item[0] == 2 and isinstance(item[1], dict)
+            ]
+
+            if len(directories) > 1:
+                for d in directories:
+                    pid = str(d.get("id") or "")
+                    if pid:
+                        board_pin_urls.append(f"https://www.pinterest.com/pin/{pid}/")
+                first_d = directories[0]
+                t = first_d.get("board", {}).get("name") or first_d.get("title")
+                if t and isinstance(t, str):
+                    title = f"Доска {t.strip()}"
+                pinner = first_d.get("pinner") or first_d.get("native_creator")
+                if isinstance(pinner, dict):
+                    uploader = pinner.get("full_name") or pinner.get("username") or uploader
+
+                return PinterestData(
+                    pin_id="board",
+                    url=target_url,
+                    title=title,
+                    uploader=uploader,
+                    media_type="board",
+                    is_board=True,
+                    board_pin_urls=board_pin_urls
+                )
+
+            # Single pin / carousel / video
+            for item in data:
+                if not isinstance(item, list) or len(item) < 2:
+                    continue
+                code = item[0]
+                if code == 2:
+                    meta = item[1]
+                    if isinstance(meta, dict):
+                        pin_id = str(meta.get("id") or pin_id)
+                        t = (
+                            meta.get("title")
+                            or meta.get("grid_title")
+                            or meta.get("closeup_unified_description")
+                            or meta.get("description")
+                        )
+                        if t and isinstance(t, str) and t.strip():
+                            title = t.strip()
+                        pinner = meta.get("pinner") or meta.get("native_creator")
+                        if isinstance(pinner, dict):
+                            uploader = pinner.get("full_name") or pinner.get("username") or uploader
+                elif code == 3:
+                    furl = item[1]
+                    fmeta = item[2] if len(item) > 2 and isinstance(item[2], dict) else {}
+                    if isinstance(furl, str):
+                        if furl.startswith("ytdl:") or furl.endswith(".mp4") or fmeta.get("extension") == "mp4":
+                            actual_v_url = furl[5:] if furl.startswith("ytdl:") else furl
+                            video_url = actual_v_url
+                        else:
+                            image_urls.append(furl)
+
+            if not pin_id:
+                m = re.search(r'/pin/(\d+)', target_url)
+                if m:
+                    pin_id = m.group(1)
+
+            if video_url:
+                media_type = "video"
+            elif len(image_urls) > 1:
+                media_type = "album"
+            elif len(image_urls) == 1:
+                media_type = "animation" if image_urls[0].lower().endswith(".gif") else "photo"
+            else:
+                return None
+
+            return PinterestData(
+                pin_id=pin_id or "pin",
+                url=target_url,
+                title=title,
+                uploader=uploader,
+                media_type=media_type,
+                image_urls=image_urls,
+                video_url=video_url,
+                duration=0,
+                is_board=False,
+                board_pin_urls=[]
+            )
+        except Exception as e:
+            logger.debug(f"gallery-dl extraction error for Pinterest {target_url}: {e}")
+            return None
+
+    async def _extract_from_html(self, resolved_url: str) -> Optional[PinterestData]:
         parsed = urlparse(resolved_url)
         path_parts = [p for p in parsed.path.strip("/").split("/") if p]
 
@@ -114,7 +223,6 @@ class PinterestService:
         is_board = False
         board_pin_urls = []
         if len(path_parts) >= 2 and path_parts[0] not in ["pin", "ideas", "search", "today", "settings"]:
-            # Find pins within board page
             pin_ids = re.findall(r'/pin/(\d+)/', html)
             seen_ids = set()
             for pid in pin_ids:
@@ -175,9 +283,12 @@ class PinterestService:
             for m in re.finditer(pattern, html, re.DOTALL):
                 try:
                     payload = json.loads(m.group(1))
-                    def walk(obj):
+                    def walk(obj, is_root=True):
                         if isinstance(obj, dict):
                             data_node = obj.get("data") if isinstance(obj.get("data"), dict) else obj
+
+                            node_id = str(data_node.get("id") or "")
+                            is_target = is_root or (pin_id and node_id == pin_id) or not pin_id
 
                             t = data_node.get("title") or data_node.get("grid_title") or data_node.get("seoTitle")
                             if t and isinstance(t, str) and t.strip():
@@ -191,40 +302,41 @@ class PinterestService:
                                 if uploader == "Pinterest":
                                     uploader = pinner.get("fullName") or pinner.get("username") or uploader
 
-                            vids = data_node.get("videos")
-                            if isinstance(vids, dict) and "video_list" in vids:
-                                for vname, vobj in vids["video_list"].items():
-                                    if isinstance(vobj, dict) and vobj.get("url"):
-                                        q = 90 if "720" in vname else (80 if "480" in vname else 50)
-                                        video_candidates.append({"url": vobj["url"], "quality": q, "duration": vobj.get("duration")})
+                            if is_target:
+                                vids = data_node.get("videos")
+                                if isinstance(vids, dict) and "video_list" in vids:
+                                    for vname, vobj in vids["video_list"].items():
+                                        if isinstance(vobj, dict) and vobj.get("url"):
+                                            q = 90 if "720" in vname else (80 if "480" in vname else 50)
+                                            video_candidates.append({"url": vobj["url"], "quality": q, "duration": vobj.get("duration")})
 
-                            spd = data_node.get("storyPinData")
-                            if isinstance(spd, dict) and "pages" in spd:
-                                for page in spd["pages"]:
-                                    for block in page.get("blocks", []):
-                                        v_block = block.get("video")
-                                        if isinstance(v_block, dict) and "video_list" in v_block:
-                                            for vname, vobj in v_block["video_list"].items():
-                                                if isinstance(vobj, dict) and vobj.get("url"):
-                                                    video_candidates.append({"url": vobj["url"], "quality": 90, "duration": vobj.get("duration")})
+                                spd = data_node.get("storyPinData")
+                                if isinstance(spd, dict) and "pages" in spd:
+                                    for page in spd["pages"]:
+                                        for block in page.get("blocks", []):
+                                            v_block = block.get("video")
+                                            if isinstance(v_block, dict) and "video_list" in v_block:
+                                                for vname, vobj in v_block["video_list"].items():
+                                                    if isinstance(vobj, dict) and vobj.get("url"):
+                                                        video_candidates.append({"url": vobj["url"], "quality": 90, "duration": vobj.get("duration")})
 
-                                        for img_key in ["images_originals", "images_750x", "images_736x", "images_474x", "images_236x"]:
-                                            if img_key in block and isinstance(block[img_key], dict) and block[img_key].get("url"):
-                                                raw_images.append(block[img_key]["url"])
-                                                break
+                                            for img_key in ["images_originals", "images_750x", "images_736x", "images_474x", "images_236x"]:
+                                                if img_key in block and isinstance(block[img_key], dict) and block[img_key].get("url"):
+                                                    raw_images.append(block[img_key]["url"])
+                                                    break
 
-                            imgs = data_node.get("images")
-                            if isinstance(imgs, dict):
-                                for s in ["orig", "736x", "564x", "474x", "236x"]:
-                                    if s in imgs and isinstance(imgs[s], dict) and imgs[s].get("url"):
-                                        raw_images.append(imgs[s]["url"])
-                                        break
+                                imgs = data_node.get("images")
+                                if isinstance(imgs, dict):
+                                    for s in ["orig", "736x", "564x", "474x", "236x"]:
+                                        if s in imgs and isinstance(imgs[s], dict) and imgs[s].get("url"):
+                                            raw_images.append(imgs[s]["url"])
+                                            break
 
                             for k, v in obj.items():
-                                walk(v)
+                                walk(v, is_root=False)
                         elif isinstance(obj, list):
                             for item in obj:
-                                walk(item)
+                                walk(item, is_root=False)
 
                     walk(payload)
                 except Exception:
@@ -242,7 +354,6 @@ class PinterestService:
                 board_pin_urls=board_pin_urls
             )
 
-        # Process image URLs preserving original extension if present
         signature_map: Dict[str, str] = {}
         ordered_signatures: List[str] = []
 
@@ -255,13 +366,11 @@ class PinterestService:
                 ordered_signatures.append(sig)
                 signature_map[sig] = img_url
             else:
-                # If current URL is /originals/, prioritize it over thumbnails
                 if "/originals/" in img_url:
                     signature_map[sig] = img_url
 
         final_images = [signature_map[s] for s in ordered_signatures if signature_map[s]]
 
-        # Best video selection
         best_video_url = None
         duration = 0
         if video_candidates:
@@ -275,7 +384,6 @@ class PinterestService:
                 best_video_url = video_candidates[0]["url"]
                 duration = int(float(video_candidates[0].get("duration") or 0) / 1000)
 
-        # Media type determination
         if best_video_url:
             media_type = "video"
         elif len(final_images) > 1:
@@ -301,6 +409,27 @@ class PinterestService:
             is_board=False
         )
 
+    async def extract_data(self, url: str) -> Optional[PinterestData]:
+        """
+        Extract metadata from a Pinterest pin or board URL.
+        Uses gallery-dl as primary extractor with HTML parsing as fallback.
+        """
+        resolved_url = await resolve_pinterest_url(url)
+
+        # Check for pin id to build clean target URL for gallery-dl
+        pin_id_match = re.search(r'/pin/(\d+)', resolved_url)
+        if not pin_id_match:
+            pin_id_match = re.search(r'/pin/(\d+)', url)
+
+        target_gdl_url = f"https://www.pinterest.com/pin/{pin_id_match.group(1)}/" if pin_id_match else resolved_url
+
+        loop = asyncio.get_running_loop()
+        gdl_data = await loop.run_in_executor(None, self._extract_with_gallery_dl, target_gdl_url)
+        if gdl_data:
+            return gdl_data
+
+        return await self._extract_from_html(resolved_url)
+
     async def download_file_with_fallback(
         self,
         session: aiohttp.ClientSession,
@@ -310,6 +439,7 @@ class PinterestService:
         """
         Download image or video file. If /originals/ returns 403/404, fallback to .png/.jpg or 736x.
         """
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
         candidates = [url]
         # Generate fallback candidates
         if "/originals/" in url:
@@ -368,18 +498,55 @@ class PinterestService:
         Download pin media files (photos, GIFs, albums, or videos).
         Returns list of downloaded file paths and final media type.
         """
+        download_dir.mkdir(parents=True, exist_ok=True)
         task_id = str(uuid.uuid4())[:8]
         downloaded_paths: List[Path] = []
         final_type = pin_data.media_type
 
         session = await http_client.get_session()
+        loop = asyncio.get_running_loop()
+
         # 1. Video pin
         if pin_data.media_type == "video" and pin_data.video_url:
             dest = download_dir / f"{task_id}_pinterest_video.mp4"
-            res = await self.download_file_with_fallback(session, pin_data.video_url, dest)
-            if res and res.exists():
-                downloaded_paths.append(res)
-                return downloaded_paths, "video"
+            # If direct progressive MP4
+            if not pin_data.video_url.endswith(".m3u8") and ".mp4" in pin_data.video_url:
+                res = await self.download_file_with_fallback(session, pin_data.video_url, dest)
+                if res and res.exists() and res.stat().st_size > 0:
+                    downloaded_paths.append(res)
+                    return downloaded_paths, "video"
+
+            # If HLS or direct download failed, use gallery-dl native download
+            logger.info(f"Downloading Pinterest video via gallery-dl for {pin_data.url}")
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["gallery-dl", "-d", str(download_dir), pin_data.url],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+            )
+            for f in download_dir.glob(f"**/*{pin_data.pin_id}*.mp4"):
+                if f.is_file() and f.stat().st_size > 0:
+                    target = download_dir / f"{task_id}_{f.name}"
+                    f.rename(target)
+                    downloaded_paths.append(target)
+                    return downloaded_paths, "video"
+
+            # Fallback for video: try ffmpeg
+            if pin_data.video_url:
+                await loop.run_in_executor(
+                    None,
+                    lambda: subprocess.run(
+                        ["ffmpeg", "-y", "-i", pin_data.video_url, "-c", "copy", str(dest)],
+                        capture_output=True,
+                        timeout=60
+                    )
+                )
+                if dest.exists() and dest.stat().st_size > 0:
+                    downloaded_paths.append(dest)
+                    return downloaded_paths, "video"
 
         # 2. Image / Album / GIF pin concurrently
         if pin_data.image_urls:
@@ -394,14 +561,48 @@ class PinterestService:
                 if isinstance(res, Path) and res.exists() and res.stat().st_size > 0:
                     downloaded_paths.append(res)
 
+        # If HTTP download yielded no files, fallback to gallery-dl native download
+        if not downloaded_paths and pin_data.url:
+            logger.info(f"Direct download yielded no files, attempting gallery-dl download for {pin_data.url}")
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["gallery-dl", "-d", str(download_dir), pin_data.url],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+            )
+            for f in download_dir.glob(f"**/*{pin_data.pin_id}*"):
+                if f.is_file() and f.stat().st_size > 0 and f.suffix.lower() in [".jpg", ".jpeg", ".png", ".gif", ".mp4", ".webp"]:
+                    target = download_dir / f"{task_id}_{f.name}"
+                    f.rename(target)
+                    downloaded_paths.append(target)
+
+        # Sanitize downloaded images to avoid Telegram IMAGE_PROCESS_FAILED
+        if downloaded_paths:
+            from bot.services.image_utils import sanitize_image
+            sanitized = []
+            for p in downloaded_paths:
+                if p.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp"]:
+                    clean_p = await sanitize_image(p)
+                    if clean_p and clean_p.exists() and clean_p.stat().st_size > 0:
+                        sanitized.append(clean_p)
+                else:
+                    sanitized.append(p)
+            downloaded_paths = sanitized
+
         if not downloaded_paths:
             return [], final_type
 
         if len(downloaded_paths) > 1:
             final_type = "album"
         elif len(downloaded_paths) == 1:
-            if downloaded_paths[0].suffix.lower() == ".gif":
+            suf = downloaded_paths[0].suffix.lower()
+            if suf == ".gif":
                 final_type = "animation"
+            elif suf in [".mp4", ".mkv", ".mov"]:
+                final_type = "video"
             else:
                 final_type = "photo"
 
