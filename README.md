@@ -44,6 +44,10 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
   - Admin-only protection: only the bot owner (`ADMIN_ID`) can upload cookies.
   - Compatible with Local Bot API server through automatic path mapping.
 - **Support for Files up to 2 GB**: Works with standard Telegram Bot API (up to 50 MB) and Local Telegram Bot API Server (up to 2000 MB).
+- **Video Notes (Telegram Circles)**:
+  - Easily convert any video, animation, or link to a native round Telegram Video Note.
+  - Reply with `/circle` (or aliases `/round`, `/krug`) to any video or send `/circle <url>`.
+  - Automatically center-crops to 1:1 (640x640), up to 60 seconds with crisp AAC audio.
 - **Overload Protection**: Task queue, concurrent download semaphore, and a limit of 1 active download task per user.
 - **Automatic Cleanup**: Downloaded temporary files are reliably deleted after sending. A background cleaner prevents Local Bot API binlog buildup.
 
@@ -55,6 +59,7 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
 | :--- | :--- |
 | `/start` | Welcome message and list of supported services |
 | `/help` | Detailed guide on how to use the bot |
+| `/circle` | Convert replied video or link into a Telegram Video Note (circle) |
 | `/cookies` | Status of active cookies and detected authentications |
 | `/status` | System status (API mode, file limits, free disk space, active downloads) |
 

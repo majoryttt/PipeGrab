@@ -4,11 +4,13 @@ import logging
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Optional, List
 
 from aiogram import Bot, Router, types, F
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
 from aiogram.types import FSInputFile, CallbackQuery, InputMediaPhoto, InputMediaVideo, InputMediaDocument
 
 from bot.config import settings
@@ -27,6 +29,7 @@ from bot.services.downloader import (
     DownloadProgress,
     MediaInfo,
 )
+from bot.services.ffmpeg_utils import convert_to_video_note
 from bot.services.queue_manager import queue_manager
 
 logger = logging.getLogger(__name__)
@@ -241,6 +244,145 @@ async def send_media_album_robust(
             await asyncio.sleep(1.0)
 
     return True
+
+
+@router.message(Command("circle", "round", "krug", "круг"))
+async def handle_circle_command(message: types.Message):
+    """
+    Handle /circle command:
+    - Reply to video / animation / document -> convert to circle note
+    - Reply to message with URL -> download video and convert to circle note
+    - Direct command with URL (/circle https://...) -> download video and convert to circle note
+    - Attached video with caption /circle -> convert to circle note
+    """
+    user_id = message.from_user.id
+    text = message.text or message.caption or ""
+
+    # 1. Check for URL in the command text itself (e.g. /circle https://...)
+    url = extract_first_url(text)
+
+    # 2. Check for attached media or reply_to_message
+    reply = message.reply_to_message
+    target_media = None
+
+    if message.video:
+        target_media = message.video
+    elif message.animation:
+        target_media = message.animation
+    elif message.video_note:
+        target_media = message.video_note
+    elif message.document and (
+        (message.document.mime_type and message.document.mime_type.startswith("video/"))
+        or (message.document.file_name and Path(message.document.file_name).suffix.lower() in [".mp4", ".mov", ".mkv", ".webm"])
+    ):
+        target_media = message.document
+    elif reply:
+        if reply.video:
+            target_media = reply.video
+        elif reply.animation:
+            target_media = reply.animation
+        elif reply.video_note:
+            target_media = reply.video_note
+        elif reply.document and (
+            (reply.document.mime_type and reply.document.mime_type.startswith("video/"))
+            or (reply.document.file_name and Path(reply.document.file_name).suffix.lower() in [".mp4", ".mov", ".mkv", ".webm"])
+        ):
+            target_media = reply.document
+        elif not url:
+            reply_text = reply.text or reply.caption or ""
+            url = extract_first_url(reply_text)
+
+    if not target_media and not url:
+        help_circle = (
+            "🔘 <b>Как создать кружок (Video Note):</b>\n\n"
+            "1️⃣ <b>Ответьте (Reply)</b> командой <code>/circle</code> на любое видео, анимацию или видеофайл.\n"
+            "2️⃣ Или отправьте команду со ссылкой на ролик:\n"
+            "<code>/circle https://...</code>\n\n"
+            "<i>Бот обрежет видео по центру в квадрат 1:1 (до 60 секунд) и пришлёт Telegram-кружок.</i>"
+        )
+        await message.reply(help_circle, parse_mode="HTML")
+        return
+
+    if not await queue_manager.can_user_download(user_id):
+        await message.reply(
+            "⏳ <b>У вас уже выполняется задача.</b>\n"
+            "Пожалуйста, дождитесь её завершения перед отправкой нового запроса.",
+            parse_mode="HTML"
+        )
+        return
+
+    status_msg = await message.reply("⚡ <i>Обрабатываю видео в кружок...</i>", parse_mode="HTML")
+    task_id = str(uuid.uuid4())[:8]
+    temp_files: List[Path] = []
+
+    try:
+        async with queue_manager.acquire(user_id):
+            source_video_path: Optional[Path] = None
+
+            if target_media:
+                in_path = settings.downloads_dir / f"{task_id}_input.mp4"
+                temp_files.append(in_path)
+                await message.bot.download(target_media, destination=in_path)
+                if in_path.exists() and in_path.stat().st_size > 0:
+                    source_video_path = in_path
+            elif url:
+                await status_msg.edit_text("⏳ <i>Скачиваю видео по ссылке...</i>", parse_mode="HTML")
+                media = await downloader_service.download_media(url=url)
+                if media:
+                    if media.file_path and media.file_path.exists():
+                        temp_files.append(media.file_path)
+                        source_video_path = media.file_path
+                    elif media.file_paths:
+                        for fp in media.file_paths:
+                            temp_files.append(fp)
+                        vid_file = next(
+                            (f for f in media.file_paths if f.suffix.lower() in [".mp4", ".mov", ".mkv", ".webm"]),
+                            None
+                        )
+                        if vid_file:
+                            source_video_path = vid_file
+
+            if not source_video_path or not source_video_path.exists() or source_video_path.stat().st_size == 0:
+                await status_msg.edit_text(
+                    "❌ <b>Не удалось получить видео для создания кружка.</b>\n"
+                    "Убедитесь, что по ссылке или в сообщении находится видеоролик.",
+                    parse_mode="HTML"
+                )
+                return
+
+            await status_msg.edit_text("🔄 <i>Конвертирую в видео-кружок (640x640)...</i>", parse_mode="HTML")
+            out_circle_path = settings.downloads_dir / f"{task_id}_circle.mp4"
+            temp_files.append(out_circle_path)
+
+            circle_res = await convert_to_video_note(source_video_path, out_circle_path, max_duration=60, size=640)
+            if not circle_res or not circle_res.exists() or circle_res.stat().st_size == 0:
+                await status_msg.edit_text("❌ <b>Ошибка при конвертации видео в кружок.</b>", parse_mode="HTML")
+                return
+
+            await message.bot.send_video_note(
+                chat_id=message.chat.id,
+                video_note=FSInputFile(str(circle_res)),
+                reply_to_message_id=message.message_id
+            )
+
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"Error in handle_circle_command for user {user_id}: {e}")
+        try:
+            await status_msg.edit_text("❌ <b>Произошла ошибка при создании кружка.</b>", parse_mode="HTML")
+        except Exception:
+            pass
+    finally:
+        for tf in temp_files:
+            try:
+                if tf.exists():
+                    tf.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 @router.message(F.text)
