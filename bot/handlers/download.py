@@ -9,7 +9,7 @@ from typing import Optional, List
 
 from aiogram import Bot, Router, types, F
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import FSInputFile, CallbackQuery, InputMediaPhoto, InputMediaVideo
+from aiogram.types import FSInputFile, CallbackQuery, InputMediaPhoto, InputMediaVideo, InputMediaDocument
 
 from bot.config import settings
 from bot.keyboards.inline import (
@@ -130,6 +130,117 @@ async def update_status_safely(message: types.Message, text: str):
     except Exception:
         # Ignore Telegram rate limits or identical content errors
         pass
+
+
+async def send_media_album_robust(
+    bot: Bot,
+    chat_id: int,
+    valid_files: List[Path],
+    title: str,
+    url: str,
+    platform_name: str,
+) -> bool:
+    """
+    Robust sender for media groups (albums).
+    Handles:
+    - Splitting into chunks of 10 items.
+    - Caption formatting (HTML -> plain text fallback).
+    - IMAGE_PROCESS_FAILED or 'failed to send message #<N>' by identifying the bad
+      item, sending it as a Document, and retrying the rest of the album as photos.
+    - Fallback to InputMediaDocument if photo processing fails for the whole group.
+    """
+    chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
+    for chunk_idx, chunk in enumerate(chunks):
+        files_in_chunk = list(chunk)
+        chunk_caption = (
+            build_safe_caption(
+                title=title,
+                url=url,
+                platform_name=platform_name,
+                prefix="📌",
+                extra=f"({len(valid_files)} медиа)"
+            )
+            if chunk_idx == 0 else None
+        )
+        plain_chunk_caption = (
+            f"{truncate_text(title, 900)}\n{url}"
+            if chunk_idx == 0 else None
+        )
+
+        async def _attempt_send(current_files: List[Path], caption_text: Optional[str], parse_mode: Optional[str]) -> bool:
+            if not current_files:
+                return True
+            if len(current_files) == 1:
+                fpath = current_files[0]
+                if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
+                    await bot.send_video(chat_id=chat_id, video=FSInputFile(str(fpath)), caption=caption_text, parse_mode=parse_mode)
+                else:
+                    await bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(fpath)), caption=caption_text, parse_mode=parse_mode)
+                return True
+
+            group = []
+            for idx, fpath in enumerate(current_files):
+                c = caption_text if idx == 0 else None
+                pm = parse_mode if idx == 0 else None
+                if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
+                    group.append(InputMediaVideo(media=FSInputFile(str(fpath)), caption=c, parse_mode=pm))
+                else:
+                    group.append(InputMediaPhoto(media=FSInputFile(str(fpath)), caption=c, parse_mode=pm))
+
+            try:
+                await bot.send_media_group(chat_id=chat_id, media=group)
+                return True
+            except TelegramBadRequest as err:
+                err_str = str(err).lower()
+                # 1. HTML parsing error -> retry with plain text
+                if parse_mode is not None and any(e in err_str for e in ["can't parse entities", "closing tag", "character limit"]):
+                    logger.warning(f"TelegramBadRequest sending HTML album ({err}), retrying with plain text")
+                    return await _attempt_send(current_files, plain_chunk_caption, None)
+
+                # 2. IMAGE_PROCESS_FAILED or specific item error
+                if "image_process_failed" in err_str or "failed to send message #" in err_str:
+                    m = re.search(r"failed to send message #(\d+)", str(err))
+                    if m and len(current_files) > 1:
+                        bad_num = int(m.group(1))
+                        bad_idx = bad_num - 1
+                        if 0 <= bad_idx < len(current_files):
+                            bad_file = current_files.pop(bad_idx)
+                            logger.warning(f"Media item #{bad_num} ({bad_file.name}) failed image processing ({err}). Retrying remaining items without it.")
+
+                            # Deliver the problematic item as a document so user gets it
+                            try:
+                                await bot.send_document(
+                                    chat_id=chat_id,
+                                    document=FSInputFile(str(bad_file)),
+                                    caption=f"📎 {bad_file.name}"
+                                )
+                            except Exception as doc_e:
+                                logger.warning(f"Failed to send dropped item as document: {doc_e}")
+
+                            # Retry the remaining items in the group
+                            return await _attempt_send(current_files, caption_text, parse_mode)
+
+                    # If specific index wasn't matched or removing didn't solve it, send entire chunk as Documents
+                    logger.warning(f"Falling back to sending album chunk as documents due to {err}")
+                    doc_group = []
+                    for idx, fpath in enumerate(current_files):
+                        c = caption_text if idx == 0 else None
+                        pm = parse_mode if idx == 0 else None
+                        doc_group.append(InputMediaDocument(media=FSInputFile(str(fpath)), caption=c, parse_mode=pm))
+                    try:
+                        await bot.send_media_group(chat_id=chat_id, media=doc_group)
+                        return True
+                    except Exception as fallback_err:
+                        logger.error(f"Failed to send album as documents fallback: {fallback_err}")
+                        raise err
+
+                raise
+
+        await _attempt_send(files_in_chunk, chunk_caption, "HTML")
+        if chunk_idx < len(chunks) - 1:
+            await asyncio.sleep(1.0)
+
+    return True
 
 
 @router.message(F.text)
@@ -476,29 +587,15 @@ async def run_download_task(
                             parse_mode="HTML"
                         )
                     elif media.media_type == MediaType.ALBUM:
-                        # Send media group, chunked to max 10 items per group (Telegram API limit)
                         valid_files = [f for f in media.file_paths if f.exists()]
-                        chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
-                        for chunk_idx, chunk in enumerate(chunks):
-                            group = []
-                            for idx, fpath in enumerate(chunk):
-                                chunk_caption = (
-                                    build_safe_caption(
-                                        title=media.title,
-                                        url=url,
-                                        platform_name=platform_title,
-                                        prefix="📌",
-                                        extra=f"({len(valid_files)} медиа)"
-                                    )
-                                    if (chunk_idx == 0 and idx == 0) else None
-                                )
-                                if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
-                                    group.append(InputMediaVideo(media=FSInputFile(str(fpath)), caption=chunk_caption, parse_mode="HTML"))
-                                else:
-                                    group.append(InputMediaPhoto(media=FSInputFile(str(fpath)), caption=chunk_caption, parse_mode="HTML"))
-                            await status_msg.bot.send_media_group(chat_id=chat_id, media=group)
-                            if chunk_idx < len(chunks) - 1:
-                                await asyncio.sleep(1.0)
+                        await send_media_album_robust(
+                            bot=status_msg.bot,
+                            chat_id=chat_id,
+                            valid_files=valid_files,
+                            title=media.title,
+                            url=url,
+                            platform_name=platform_title,
+                        )
                     elif audio_only or media.media_type == MediaType.AUDIO:
                         a_caption = build_safe_caption(
                             title=media.title,
@@ -537,16 +634,14 @@ async def run_download_task(
                         await status_msg.bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(media.file_path)), caption=plain_caption)
                     elif media.media_type == MediaType.ALBUM:
                         valid_files = [f for f in media.file_paths if f.exists()]
-                        chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
-                        for chunk_idx, chunk in enumerate(chunks):
-                            group = []
-                            for idx, fpath in enumerate(chunk):
-                                chunk_caption = plain_caption if (chunk_idx == 0 and idx == 0) else None
-                                if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
-                                    group.append(InputMediaVideo(media=FSInputFile(str(fpath)), caption=chunk_caption))
-                                else:
-                                    group.append(InputMediaPhoto(media=FSInputFile(str(fpath)), caption=chunk_caption))
-                            await status_msg.bot.send_media_group(chat_id=chat_id, media=group)
+                        await send_media_album_robust(
+                            bot=status_msg.bot,
+                            chat_id=chat_id,
+                            valid_files=valid_files,
+                            title=media.title,
+                            url=url,
+                            platform_name=platform_title,
+                        )
                     elif audio_only or media.media_type == MediaType.AUDIO:
                         await status_msg.bot.send_audio(
                             chat_id=chat_id,

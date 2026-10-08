@@ -29,6 +29,10 @@ class LocalFilesPathWrapper(FilesPathWrapper):
     def to_server(self, path: Union[Path, str]) -> Path:
         p = Path(path)
         try:
+            p_res = p.resolve()
+            if p_res.is_relative_to(self.local_path):
+                rel = p_res.relative_to(self.local_path)
+                return self.server_path / rel
             if p.is_relative_to(self.local_path):
                 rel = p.relative_to(self.local_path)
                 return self.server_path / rel

@@ -12,6 +12,7 @@ import aiofiles
 import aiohttp
 
 from bot.services.http_client import http_client
+from bot.services.image_utils import sanitize_image
 
 logger = logging.getLogger(__name__)
 
@@ -282,14 +283,26 @@ class TikTokService:
                 if res is True and fp.exists() and fp.stat().st_size > 0
             ]
 
+            # Validate and repair downloaded images concurrently
+            sanitize_tasks = [sanitize_image(fp) for fp in downloaded_images]
+            sanitized_results = await asyncio.gather(*sanitize_tasks, return_exceptions=True)
+            valid_images = [
+                res for res in sanitized_results
+                if isinstance(res, Path) and res.exists() and res.stat().st_size > 0
+            ]
+
+            if not valid_images:
+                logger.warning(f"No valid images remaining after sanitization for {data.url}")
+                return [], None, "video"
+
             audio_path = (
                 candidate_audio
                 if (music_res is True and candidate_audio and candidate_audio.exists() and candidate_audio.stat().st_size > 0)
                 else None
             )
 
-            media_type = "photo" if len(downloaded_images) == 1 else "album"
-            return downloaded_images, audio_path, media_type
+            media_type = "photo" if len(valid_images) == 1 else "album"
+            return valid_images, audio_path, media_type
 
         return [], None, "video"
 
