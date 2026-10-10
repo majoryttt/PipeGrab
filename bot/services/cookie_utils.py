@@ -95,49 +95,75 @@ def sanitize_netscape_content(content: str) -> str:
 
 def normalize_vk_cookies_content(content: str) -> str:
     """
-    Ensure essential VK authentication cookies (e.g. remixsid, remixnsid, remixdsid)
-    are mirrored across .vk.com, .vk.ru, and .vkvideo.ru.
-    This guarantees that yt-dlp (which queries vk.com) and aiohttp work properly
-    regardless of which VK domain the user exported cookies from.
+    Ensure essential VK authentication cookies (remixsid, remixnsid, remixdsid)
+    are cleaned, deduplicated, and synchronized across .vk.com, .vk.ru, and .vkvideo.ru.
+
+    If the file contains multiple or conflicting sessions (e.g. an old session on vk.com
+    and a fresh session on vk.ru, or duplicate host-only vs domain-level cookies),
+    this extracts the freshest session (highest expires timestamp or latest in file)
+    and enforces a single consistent auth cookie per domain, removing all stale duplicates.
     """
     if not content:
         return content
 
-    # First sanitize existing lines to repair any flag mismatches
-    content = sanitize_netscape_content(content)
-
     target_vk_domains = [".vk.com", ".vk.ru", ".vkvideo.ru"]
-    key_cookies: Dict[str, Tuple[str, str, str, str, str]] = {}
-    existing_pairs: Set[Tuple[str, str]] = set()
+    auth_cookie_names = {"remixsid", "remixnsid", "remixdsid"}
 
-    lines = content.splitlines()
-    for line in lines:
+    freshest_auth: Dict[str, Tuple[int, int, str, str, str]] = {}
+    preserved_lines: List[str] = []
+
+    for idx, line in enumerate(content.splitlines()):
         stripped = line.strip()
+        if stripped == "# PipeGrab Normalized VK Authentication":
+            continue
         if not stripped or stripped.startswith("#"):
+            preserved_lines.append(line)
             continue
         parts = stripped.split("\t")
         if len(parts) >= 7:
-            domain, flag, path, secure, expires, name, value = parts[:7]
+            domain, flag, path, secure, expires_str, name, value = parts[:7]
             domain_clean = domain.lower()
+
+            # Remove browser redirect cookies that can break yt-dlp on vk.com
+            if name == "REDIRECT_TO_VK_RU":
+                continue
+
             if any(vk_d in domain_clean for vk_d in ["vk.com", "vk.ru", "vkvideo.ru"]):
-                existing_pairs.add((domain_clean, name))
-                if name.startswith("remix") or name in ["_clientId", "sui", "p"]:
-                    if value and value != '""':
-                        key_cookies[name] = (flag, path, secure, expires, value)
+                if name in auth_cookie_names and value and value != '""':
+                    try:
+                        exp = int(expires_str)
+                    except ValueError:
+                        exp = 0
+                    if (
+                        name not in freshest_auth
+                        or exp > freshest_auth[name][0]
+                        or (exp == freshest_auth[name][0] and idx >= freshest_auth[name][1])
+                    ):
+                        freshest_auth[name] = (exp, idx, path, secure, value)
+                    # Filter out old/conflicting auth lines - clean ones will be injected
+                    continue
 
-    new_lines: List[str] = []
-    for name, (flag, path, secure, expires, value) in key_cookies.items():
-        for target_domain in target_vk_domains:
-            if (target_domain, name) not in existing_pairs and (target_domain.lstrip("."), name) not in existing_pairs:
-                correct_flag = "TRUE" if target_domain.startswith(".") else "FALSE"
-                new_lines.append(f"{target_domain}\t{correct_flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
-                existing_pairs.add((target_domain, name))
+            # Ensure domain_specified == initial_dot for all preserved lines
+            parts[1] = "TRUE" if domain.startswith(".") else "FALSE"
+            preserved_lines.append("\t".join(parts))
+        else:
+            preserved_lines.append(line)
 
-    if new_lines:
-        delimiter = "\n" if content.endswith("\n") else "\n\n"
-        content = content + delimiter + "\n".join(new_lines) + "\n"
+    new_auth_lines: List[str] = []
+    for name in sorted(freshest_auth.keys()):
+        exp, _, path, secure, value = freshest_auth[name]
+        for dom in target_vk_domains:
+            new_auth_lines.append(f"{dom}\tTRUE\t{path}\t{secure}\t{exp}\t{name}\t{value}")
 
-    return content
+    while preserved_lines and not preserved_lines[-1].strip():
+        preserved_lines.pop()
+
+    result = "\n".join(preserved_lines)
+    if new_auth_lines:
+        prefix = "\n\n" if result else ""
+        result = result + prefix + "# PipeGrab Normalized VK Authentication\n" + "\n".join(new_auth_lines) + "\n"
+
+    return result
 
 
 def extract_cookies_for_domains(content: str, target_domains: List[str]) -> Dict[str, str]:
