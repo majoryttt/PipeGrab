@@ -198,10 +198,10 @@ async def handle_document_upload(message: types.Message):
         # Move to persistent cookies location
         settings.cookies_file.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(temp_path), str(settings.cookies_file))
+        file_size_kb = settings.cookies_file.stat().st_size / 1024
         logger.info(f"Updated cookies file: {settings.cookies_file} ({file_size_kb:.1f} KB), detected: {services}")
 
         services_str = "\n".join(f"• {s}" for s in services) if services else "• Общие cookies"
-        file_size_kb = settings.cookies_file.stat().st_size / 1024
 
         await status_msg.edit_text(
             f"✅ <b>Файл cookies успешно сохранён и подключён!</b>\n\n"
