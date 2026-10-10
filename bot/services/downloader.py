@@ -323,11 +323,14 @@ class DownloaderService:
                 return ydl.extract_info(url, download=False)
 
         try:
-            initial_use_cookies = (platform != Platform.VK)
+            initial_use_cookies = settings.has_cookies
             try:
                 info = await asyncio.to_thread(_extract, initial_use_cookies)
             except Exception as first_err:
-                if platform == Platform.VK and settings.has_cookies and not initial_use_cookies:
+                if platform == Platform.VK and initial_use_cookies:
+                    # Fallback to anonymous if authenticated extraction failed on VK
+                    info = await asyncio.to_thread(_extract, False)
+                elif platform == Platform.VK and not initial_use_cookies and settings.has_cookies:
                     info = await asyncio.to_thread(_extract, True)
                 else:
                     raise first_err
@@ -638,11 +641,14 @@ class DownloaderService:
                 return ydl.extract_info(url, download=True)
 
         try:
-            initial_use_cookies = (platform != Platform.VK)
+            initial_use_cookies = settings.has_cookies
             try:
                 info = await asyncio.to_thread(_download, initial_use_cookies)
             except Exception as dl_err:
-                if platform == Platform.VK and settings.has_cookies and not initial_use_cookies:
+                if platform == Platform.VK and initial_use_cookies:
+                    # Fallback to anonymous if authenticated download failed on VK
+                    info = await asyncio.to_thread(_download, False)
+                elif platform == Platform.VK and not initial_use_cookies and settings.has_cookies:
                     info = await asyncio.to_thread(_download, True)
                 else:
                     raise dl_err
