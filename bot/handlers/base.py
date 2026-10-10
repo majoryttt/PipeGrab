@@ -180,7 +180,7 @@ async def cmd_vk_token(message: types.Message):
 
         auth_url = (
             "https://oauth.vk.com/authorize?"
-            "client_id=6121396&scope=video,offline&redirect_uri=https://oauth.vk.com/blank.html&response_type=token&v=5.199"
+            "client_id=2685278&scope=1073737727&redirect_uri=https://oauth.vk.com/blank.html&response_type=token"
         )
 
         text = (
@@ -188,10 +188,11 @@ async def cmd_vk_token(message: types.Message):
             f"{status_line}\n"
             "Токен пользователя позволяет скачивать любые видео («только для зарегистрированных», приватные) "
             "напрямую через мобильный API ВК на максимальной скорости и без блокировок зарубежных IP.\n\n"
-            "<b>Инструкция по получению токена (1 минута):</b>\n"
+            "<b>Инструкция по получению токена (30 секунд):</b>\n"
             "1. Войдите в свой аккаунт ВКонтакте в браузере.\n"
-            f"2. Откройте ссылку авторизации:\n"
+            f"2. Откройте ссылку авторизации Kate Mobile:\n"
             f"<a href=\"{auth_url}\">👉 Нажмите сюда для получения токена</a>\n"
+            "<i>(Или перейдите на сайт <a href=\"https://vkhost.github.io/\">vkhost.github.io</a> и выберите Kate Mobile)</i>\n"
             "3. Нажмите кнопку <b>«Разрешить»</b>.\n"
             "4. В адресной строке браузера скопируйте полученную ссылку (или значение <code>access_token</code>).\n"
             "5. Отправьте боту команду:\n"
