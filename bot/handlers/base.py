@@ -1,9 +1,11 @@
 import aiofiles
+import aiohttp
 import logging
 import os
 import shutil
 import time
 from pathlib import Path
+from typing import Tuple
 from aiogram import Bot, Router, types, F
 from aiogram.filters import CommandStart, Command
 
@@ -29,12 +31,14 @@ async def cmd_start(message: types.Message):
         "• 🎵 <b>TikTok</b> — видео без водяных знаков\n"
         "• 📸 <b>Instagram</b> — Reels, видео, публикации, а также <b>истории</b> (через cookies)\n"
         "• 📌 <b>Pinterest</b> — фото в оригинальном качестве, GIF, альбомы (карусели) и видео\n"
-        "• 🔵 <b>VK (ВКонтакте)</b> — видео, клипы, посты со стены, фото и карусели (включая приватный контент через cookies)\n"
+        "• 🔵 <b>VK (ВКонтакте)</b> — видео, клипы, посты со стены, фото и карусели (включая приватный контент через cookies и VK API)\n"
         "• 🐦 <b>Twitter / X</b> — видео и клипы\n\n"
         "🚀 <b>Как пользоваться:</b>\n"
         "Просто отправьте мне ссылку в сообщении!\n\n"
         "🍪 <b>Авторизация и Cookies (/cookies):</b>\n"
-        "Истории Instagram, закрытые видео/посты ВКонтакте и защита от проверок доступны при подключении cookies. Используйте команду /cookies для проверки и добавления cookies."
+        "Истории Instagram, закрытые посты ВКонтакте и защита от проверок доступны при подключении cookies.\n\n"
+        "🔑 <b>Прямая загрузка ВК (/vk_token):</b>\n"
+        "Для скачивания любых видео и клипов ВКонтакте без ограничений зарубежных дата-центров используйте команду /vk_token."
     )
     await message.answer(welcome_text, parse_mode="HTML")
 
@@ -48,12 +52,14 @@ async def cmd_help(message: types.Message):
         "3️⃣ <b>Pinterest:</b> бот автоматически определяет тип контента (фото, альбом, GIF-анимация или видео) и скачивает в максимальном качестве.\n"
         "4️⃣ <b>YouTube:</b> бот предложит скачать видео в MP4 или аудиодорожку в MP3.\n"
         "5️⃣ <b>Плейлисты и доски:</b> бот предложит выбрать количество элементов для загрузки.\n"
-        "6️⃣ <b>Авторизация и Cookies:</b> отправьте команду /cookies для инструкции по добавлению файла <code>cookies.txt</code> (для историй Instagram, закрытых видео/постов ВК и YouTube).\n"
-        "7️⃣ <b>Кружки (Video Notes):</b> ответьте командой /circle на любое видео или отправьте <code>/circle &lt;ссылка&gt;</code>.\n\n"
+        "6️⃣ <b>Авторизация и Cookies:</b> отправьте команду /cookies для инструкции по добавлению файла <code>cookies.txt</code> (для историй Instagram и закрытых постов).\n"
+        "7️⃣ <b>Прямой доступ к видео ВК:</b> отправьте команду /vk_token для подключения официального токена ВК (решает проблему блокировок зарубежных IP).\n"
+        "8️⃣ <b>Кружки (Video Notes):</b> ответьте командой /circle на любое видео или отправьте <code>/circle &lt;ссылка&gt;</code>.\n\n"
         "<b>Команды бота:</b>\n"
         "/start — Главное меню\n"
         "/help — Справка и возможности\n"
         "/circle — Превратить видео или ссылку в Telegram-кружок\n"
+        "/vk_token — Статус и настройка прямого скачивания видео ВКонтакте\n"
         "/cookies — Статус и настройка авторизации Instagram / ВКонтакте / YouTube\n"
         "/status — Состояние сервера и лимиты"
     )
@@ -103,6 +109,129 @@ async def cmd_cookies(message: types.Message):
             "Бот автоматически проверит и установит файл."
         )
     await message.answer(text, parse_mode="HTML")
+
+
+def extract_token_from_input(text: str) -> str:
+    """
+    Extract raw access_token from various user inputs:
+    - full oauth URL: https://oauth.vk.com/blank.html#access_token=vk1.a...&expires_in=0
+    - key=value string: access_token=vk1.a...
+    - raw token: vk1.a...
+    """
+    text = text.strip()
+    if "#" in text:
+        text = text.split("#", 1)[1]
+    if "?" in text:
+        text = text.split("?", 1)[1]
+    if "access_token=" in text:
+        for part in text.split("&"):
+            if part.startswith("access_token="):
+                return part.split("access_token=", 1)[1].strip()
+    return text.strip()
+
+
+async def validate_vk_token(token: str) -> Tuple[bool, str]:
+    """
+    Check if a VK access token is valid by calling users.get.
+    Returns (is_valid, user_or_error_info).
+    """
+    endpoint = f"https://api.vk.com/method/users.get?v=5.199&access_token={token}"
+    try:
+        from bot.services.http_client import http_client
+        session = await http_client.get_session()
+        async with session.get(endpoint, timeout=aiohttp.ClientTimeout(total=10), proxy=settings.vk_proxy) as resp:
+            if resp.status != 200:
+                return False, f"HTTP {resp.status}"
+            data = await resp.json()
+            if "error" in data:
+                err = data["error"]
+                return False, f"[{err.get('error_code')}] {err.get('error_msg')}"
+            items = data.get("response", [])
+            if items:
+                u = items[0]
+                return True, f"{u.get('first_name', '')} {u.get('last_name', '')} (ID: {u.get('id')})".strip()
+            return True, "Авторизован"
+    except Exception as e:
+        return False, str(e)
+
+
+@router.message(Command("vk_token"))
+async def cmd_vk_token(message: types.Message):
+    if settings.admin_id and message.from_user.id != settings.admin_id:
+        await message.reply(
+            "⛔️ <b>Доступ ограничен.</b> Только администратор бота может настраивать токен ВКонтакте.",
+            parse_mode="HTML"
+        )
+        return
+
+    command_args = ""
+    if message.text:
+        parts = message.text.split(maxsplit=1)
+        if len(parts) > 1:
+            command_args = parts[1].strip()
+
+    if not command_args:
+        active_token = settings.active_vk_token
+        if active_token:
+            masked = f"{active_token[:6]}...{active_token[-4:]}" if len(active_token) > 10 else "***"
+            status_line = f"✅ <b>Токен подключён и активен:</b> <code>{masked}</code>\n"
+        else:
+            status_line = "⚠️ <b>Токен не установлен.</b> Приватные/ограниченные видео ВК могут блокироваться дата-центром.\n"
+
+        auth_url = (
+            "https://oauth.vk.com/authorize?"
+            "client_id=6121396&scope=video,offline&redirect_uri=https://oauth.vk.com/blank.html&response_type=token&v=5.199"
+        )
+
+        text = (
+            "🔵 <b>Настройка VK API (VK_USER_TOKEN):</b>\n\n"
+            f"{status_line}\n"
+            "Токен пользователя позволяет скачивать любые видео («только для зарегистрированных», приватные) "
+            "напрямую через мобильный API ВК на максимальной скорости и без блокировок зарубежных IP.\n\n"
+            "<b>Инструкция по получению токена (1 минута):</b>\n"
+            "1. Войдите в свой аккаунт ВКонтакте в браузере.\n"
+            f"2. Откройте ссылку авторизации:\n"
+            f"<a href=\"{auth_url}\">👉 Нажмите сюда для получения токена</a>\n"
+            "3. Нажмите кнопку <b>«Разрешить»</b>.\n"
+            "4. В адресной строке браузера скопируйте полученную ссылку (или значение <code>access_token</code>).\n"
+            "5. Отправьте боту команду:\n"
+            "<code>/vk_token ВАШ_ТОКЕН</code>\n\n"
+            "<i>(Также токен можно прописать в файле .env: VK_USER_TOKEN=...)</i>"
+        )
+        await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+        return
+
+    raw_input = command_args
+    token = extract_token_from_input(raw_input)
+    if not token or len(token) < 15:
+        await message.reply("❌ Не удалось распознать токен. Проверьте отправленное значение.")
+        return
+
+    status_msg = await message.reply("⏳ <i>Проверяю токен через API ВКонтакте...</i>", parse_mode="HTML")
+    is_valid, user_info = await validate_vk_token(token)
+
+    if not is_valid:
+        await status_msg.edit_text(
+            f"❌ <b>Токен недействителен:</b> {user_info}\n\n"
+            "Убедитесь, что вы скопировали полный <code>access_token</code> без лишних символов.",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        settings.vk_token_file.parent.mkdir(parents=True, exist_ok=True)
+        settings.vk_token_file.write_text(token, encoding="utf-8")
+        settings.vk_user_token = token
+
+        await status_msg.edit_text(
+            "✅ <b>Токен ВКонтакте успешно подключён и сохранён!</b>\n\n"
+            f"👤 Авторизован как: <b>{user_info}</b>\n"
+            f"📁 Сохранено в: <code>{settings.vk_token_file}</code>\n\n"
+            "🎉 Теперь любые видео и клипы ВКонтакте скачиваются на максимальной скорости в обход всех веб-блокировок!",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка сохранения токена: {e}")
 
 
 async def download_telegram_document(bot: Bot, doc: types.Document, destination: Path) -> Path:
@@ -155,6 +284,40 @@ async def download_telegram_document(bot: Bot, doc: types.Document, destination:
 async def handle_document_upload(message: types.Message):
     doc = message.document
     filename = (doc.file_name or "").lower()
+
+    # Handle VK token file upload
+    if filename in ["vk_token.txt", "token.txt"]:
+        if settings.admin_id and message.from_user.id != settings.admin_id:
+            await message.reply(
+                "⛔️ <b>Доступ ограничен.</b> Только администратор бота может загружать токен ВКонтакте.",
+                parse_mode="HTML"
+            )
+            return
+
+        temp_path = settings.downloads_dir / f"temp_token_{message.from_user.id}.txt"
+        try:
+            await download_telegram_document(message.bot, doc, destination=temp_path)
+            content = temp_path.read_text(encoding="utf-8", errors="ignore").strip()
+            token = extract_token_from_input(content)
+            is_valid, user_info = await validate_vk_token(token)
+            if is_valid:
+                settings.vk_token_file.parent.mkdir(parents=True, exist_ok=True)
+                settings.vk_token_file.write_text(token, encoding="utf-8")
+                settings.vk_user_token = token
+                await message.reply(
+                    f"✅ <b>Токен ВКонтакте успешно подключён из файла!</b>\n\n👤 Авторизован как: <b>{user_info}</b>",
+                    parse_mode="HTML"
+                )
+                return
+            else:
+                await message.reply(f"❌ Токен в файле недействителен: {user_info}")
+                return
+        except Exception as e:
+            await message.reply(f"❌ Ошибка обработки файла токена: {e}")
+            return
+        finally:
+            if temp_path.exists():
+                temp_path.unlink(missing_ok=True)
 
     # Process if file is cookies.txt or contains cookie and ends in .txt
     if not (filename == "cookies.txt" or ("cookie" in filename and filename.endswith(".txt"))):
@@ -229,10 +392,17 @@ async def cmd_status(message: types.Message):
     else:
         cookies_status = "Отсутствуют ⚠️ (истории Instagram недоступны)"
 
+    if settings.active_vk_token:
+        masked = f"{settings.active_vk_token[:6]}...{settings.active_vk_token[-4:]}" if len(settings.active_vk_token) > 10 else "***"
+        vk_token_status = f"Подключён ✅ ({masked})"
+    else:
+        vk_token_status = "Не настроен ⚠️ (/vk_token)"
+
     status_text = (
         "📊 <b>Статус бота:</b>\n\n"
         f"• <b>Режим Bot API:</b> {api_mode}\n"
         f"• <b>Cookies:</b> {cookies_status}\n"
+        f"• <b>VK API Token:</b> {vk_token_status}\n"
         f"• <b>Активных загрузок:</b> {len(queue_manager._active_users)}\n"
         f"• <b>Свободно места на диске:</b> {free // (1024 * 1024 * 1024)} ГБ / {total // (1024 * 1024 * 1024)} ГБ\n"
         f"• <b>Лимит размера файла:</b> {settings.max_file_size_mb} МБ\n"

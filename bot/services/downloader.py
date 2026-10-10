@@ -162,6 +162,10 @@ class DownloaderService:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
         }
+        # Support VK proxy if configured
+        if platform == Platform.VK and settings.vk_proxy:
+            opts["proxy"] = settings.vk_proxy
+
         # For VK, anonymous requests are more reliable by default because exported cookies often have expired sessions
         if platform == Platform.VK and not use_cookies:
             return opts
@@ -296,6 +300,19 @@ class DownloaderService:
                             )
                         elif vk_data.media_type == "video" and vk_data.video_url:
                             url = vk_data.video_url
+                            if settings.active_vk_token:
+                                vk_vid = await vk_service.extract_video(url)
+                                if vk_vid:
+                                    return MediaInfo(
+                                        title=vk_vid.title,
+                                        duration=vk_vid.duration,
+                                        uploader=vk_vid.uploader,
+                                        is_playlist=False,
+                                        playlist_count=0,
+                                        platform=Platform.VK,
+                                        url=vk_vid.url,
+                                        media_type=MediaType.VIDEO
+                                    )
                 except Exception as ve:
                     logger.warning(f"VK wall post extractor failed for {url}: {ve}")
             elif vk_type == "photo":
@@ -314,6 +331,22 @@ class DownloaderService:
                         )
                 except Exception as ve:
                     logger.warning(f"VK photo extractor failed for {url}: {ve}")
+            elif vk_type in ["video", "clip"] and settings.active_vk_token:
+                try:
+                    vk_vid = await vk_service.extract_video(url)
+                    if vk_vid:
+                        return MediaInfo(
+                            title=vk_vid.title,
+                            duration=vk_vid.duration,
+                            uploader=vk_vid.uploader,
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.VK,
+                            url=vk_vid.url,
+                            media_type=MediaType.VIDEO
+                        )
+                except Exception as ve:
+                    logger.warning(f"VK video extractor failed for {url}: {ve}")
 
         # 6. Generic yt-dlp extraction
         def _extract(use_cookies: bool = True):
@@ -567,10 +600,59 @@ class DownloaderService:
                                     file_size=total_size
                                 )
                         elif vk_data.media_type == "video" and vk_data.video_url:
-                            # If wall post contains video, switch to video url and proceed to yt-dlp
+                            # If wall post contains video, switch to video url
                             url = vk_data.video_url
+                            if settings.active_vk_token:
+                                vk_vid = await vk_service.extract_video(url)
+                                if vk_vid:
+                                    file_path, thumb_path, file_size = await vk_service.download_video(
+                                        vk_vid,
+                                        self.download_dir,
+                                        progress_callback=progress_callback
+                                    )
+                                    if file_path and file_path.exists():
+                                        return MediaInfo(
+                                            title=vk_vid.title,
+                                            duration=vk_vid.duration,
+                                            uploader=vk_vid.uploader,
+                                            is_playlist=False,
+                                            playlist_count=0,
+                                            platform=Platform.VK,
+                                            url=url,
+                                            media_type=MediaType.VIDEO,
+                                            file_path=file_path,
+                                            file_paths=[file_path],
+                                            thumbnail_path=thumb_path,
+                                            file_size=file_size
+                                        )
                 except Exception as ve:
                     logger.warning(f"VK post direct download failed for {url}: {ve}")
+            elif vk_type in ["video", "clip"] and settings.active_vk_token:
+                try:
+                    vk_vid = await vk_service.extract_video(url)
+                    if vk_vid:
+                        file_path, thumb_path, file_size = await vk_service.download_video(
+                            vk_vid,
+                            self.download_dir,
+                            progress_callback=progress_callback
+                        )
+                        if file_path and file_path.exists():
+                            return MediaInfo(
+                                title=vk_vid.title,
+                                duration=vk_vid.duration,
+                                uploader=vk_vid.uploader,
+                                is_playlist=False,
+                                playlist_count=0,
+                                platform=Platform.VK,
+                                url=url,
+                                media_type=MediaType.VIDEO,
+                                file_path=file_path,
+                                file_paths=[file_path],
+                                thumbnail_path=thumb_path,
+                                file_size=file_size
+                            )
+                except Exception as ve:
+                    logger.warning(f"VK video direct download failed for {url}: {ve}")
 
         # 5. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, VK, and Pinterest videos)
         task_id = str(uuid.uuid4())[:8]

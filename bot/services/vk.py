@@ -11,11 +11,13 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 import aiofiles
 import aiohttp
+import time
 
 from bot.config import settings
 from bot.services.http_client import http_client
 from bot.services.image_utils import sanitize_image
 from bot.services.cookie_utils import extract_cookies_for_domains
+from bot.services.ffmpeg_utils import generate_thumbnail
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +164,31 @@ class VKPostData:
     error_message: Optional[str] = None
 
 
+@dataclass
+class VKDownloadProgress:
+    status: str = "downloading"
+    downloaded_bytes: int = 0
+    total_bytes: int = 0
+    percent: float = 0.0
+    speed: float = 0.0
+    eta: int = 0
+
+
+@dataclass
+class VKVideoData:
+    url: str
+    video_id: str
+    title: str = "Видео ВКонтакте"
+    duration: int = 0
+    uploader: str = "ВКонтакте"
+    thumbnail_url: Optional[str] = None
+    stream_url: Optional[str] = None
+    is_hls: bool = False
+    quality: Optional[str] = None
+    files: Dict[str, str] = field(default_factory=dict)
+    error_message: Optional[str] = None
+
+
 class VKService:
     def __init__(self):
         self.headers = VK_HEADERS
@@ -188,15 +215,19 @@ class VKService:
         path = parsed.path
         query = parse_qs(parsed.query)
 
-        # Check for ?w=wall-123_456 or ?w=photo-123_456
+        # Check for ?w=wall-123_456, ?w=photo-123_456, ?w=video-123_456
         if "w" in query and query["w"]:
             w_val = query["w"][0]
             if w_val.startswith("wall"):
                 return "wall", w_val.replace("wall", "")
             elif w_val.startswith("photo"):
                 return "photo", w_val.replace("photo", "")
+            elif w_val.startswith("video"):
+                return "video", w_val.replace("video", "").split("_")[:2][0] + "_" + w_val.replace("video", "").split("_")[1] if len(w_val.replace("video", "").split("_")) >= 2 else w_val.replace("video", "")
+            elif w_val.startswith("clip"):
+                return "clip", w_val.replace("clip", "")
 
-        # Check for ?z=photo-123_456%2Fwall-123_456 (photo in wall post context)
+        # Check for ?z=photo-123_456%2Fwall-123_456 or ?z=video-123_456
         if "z" in query and query["z"]:
             z_val = unquote(query["z"][0])
             wall_m = re.search(r"wall(-?\d+_\d+)", z_val)
@@ -205,6 +236,9 @@ class VKService:
             photo_m = re.search(r"photo(-?\d+_\d+)", z_val)
             if photo_m:
                 return "photo", photo_m.group(1)
+            video_m = re.search(r"video(-?\d+_\d+)", z_val)
+            if video_m:
+                return "video", video_m.group(1)
 
         # Path based patterns
         # Video: /video-123_456 or /video123_456
@@ -228,6 +262,48 @@ class VKService:
             return "photo", photo_m.group(1)
 
         return "unknown", None
+
+    def parse_vk_video_target(self, url: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Extract video ID (owner_id_video_id) and optional access_key from a VK video/clip URL.
+        Returns (video_id, access_key).
+        """
+        parsed = urlparse(url)
+        path = parsed.path
+        query = parse_qs(parsed.query)
+
+        access_key = None
+        if "access_key" in query and query["access_key"]:
+            access_key = query["access_key"][0]
+
+        target_str = ""
+        if "w" in query and query["w"]:
+            w_val = query["w"][0]
+            if w_val.startswith("video"):
+                target_str = "/" + w_val
+        elif "z" in query and query["z"]:
+            z_val = unquote(query["z"][0])
+            m = re.search(r"video(-?\d+_\d+)(?:[/_]([a-zA-Z0-9]+))?", z_val)
+            if m:
+                vid = m.group(1)
+                ak = m.group(2)
+                return vid, (access_key or ak)
+
+        if not target_str:
+            target_str = path
+
+        # Support /video-123_456, /video-123_456/abc, /video-123_456_abc, /clip-123_456
+        m = re.search(r"/(?:video|clip)(-?\d+_\d+)(?:[/_]([a-zA-Z0-9]+))?", target_str)
+        if m:
+            vid = m.group(1)
+            ak = m.group(2)
+            return vid, (access_key or ak)
+
+        vtype, vid = self.parse_vk_url_type(url)
+        if vtype in ["video", "clip"] and vid:
+            return vid, access_key
+
+        return None, None
 
     async def _fetch_wkview(self, post_id: str) -> Optional[str]:
         """
@@ -298,16 +374,16 @@ class VKService:
 
     async def _fetch_via_api(self, post_id: str) -> Optional[VKPostData]:
         """
-        Optional fetch via official VK API if VK_SERVICE_TOKEN is configured.
+        Optional fetch via official VK API if active VK token is configured.
         """
-        token = settings.vk_service_token
+        token = settings.active_vk_token
         if not token:
             return None
 
         endpoint = f"https://api.vk.com/method/wall.getById?posts={post_id}&extended=1&v=5.199&access_token={token}"
         try:
             session = await http_client.get_session()
-            async with session.get(endpoint, headers=self.headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(endpoint, headers=self.headers, proxy=settings.vk_proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     response = data.get("response", {})
@@ -518,11 +594,12 @@ class VKService:
             return None
 
         # If official VK API token is present
-        if settings.vk_service_token:
-            endpoint = f"https://api.vk.com/method/photos.getById?photos={photo_id}&extended=1&v=5.199&access_token={settings.vk_service_token}"
+        token = settings.active_vk_token
+        if token:
+            endpoint = f"https://api.vk.com/method/photos.getById?photos={photo_id}&extended=1&v=5.199&access_token={token}"
             try:
                 session = await http_client.get_session()
-                async with session.get(endpoint, headers=self.headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                async with session.get(endpoint, headers=self.headers, proxy=settings.vk_proxy, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         items = data.get("response", [])
@@ -592,6 +669,282 @@ class VKService:
 
         final_type = "photo" if len(downloaded_files) == 1 else "album"
         return downloaded_files, post_data.text, final_type
+
+    async def extract_video(self, url: str) -> Optional[VKVideoData]:
+        """
+        Extract video information and stream URLs using official VK API (video.get).
+        Requires settings.active_vk_token (user access token or service token).
+        """
+        token = settings.active_vk_token
+        if not token:
+            logger.debug("No VK token available for extract_video")
+            return None
+
+        url = await resolve_vk_url(url)
+        video_id, access_key = self.parse_vk_video_target(url)
+        if not video_id:
+            logger.debug(f"Could not parse VK video ID from {url}")
+            return None
+
+        videos_param = f"{video_id}_{access_key}" if access_key else video_id
+        endpoint = "https://api.vk.com/method/video.get"
+        params = {
+            "videos": videos_param,
+            "extended": 1,
+            "fields": "id,owner_id,title,description,duration,files,player,views,image",
+            "access_token": token,
+            "v": "5.199",
+        }
+
+        try:
+            session = await http_client.get_session()
+            timeout = aiohttp.ClientTimeout(total=15)
+            proxy = settings.vk_proxy
+            async with session.get(endpoint, params=params, headers=self.headers, proxy=proxy, timeout=timeout) as resp:
+                if resp.status != 200:
+                    logger.warning(f"VK video.get returned HTTP {resp.status} for {videos_param}")
+                    return None
+
+                data = await resp.json()
+                if "error" in data:
+                    err = data["error"]
+                    logger.warning(f"VK video.get API error {err.get('error_code')}: {err.get('error_msg')}")
+                    return None
+
+                items = data.get("response", {}).get("items", [])
+                if not items:
+                    logger.info(f"VK video.get returned no items for {videos_param}")
+                    return None
+
+                item = items[0]
+                title = strip_html_tags(item.get("title", "")) or "Видео ВКонтакте"
+                duration = item.get("duration", 0)
+
+                # Resolve author/uploader
+                uploader = "ВКонтакте"
+                owner_id = item.get("owner_id")
+                if owner_id and owner_id < 0:
+                    for g in data.get("response", {}).get("groups", []):
+                        if g.get("id") == abs(owner_id):
+                            uploader = g.get("name", uploader)
+                            break
+                elif owner_id:
+                    for p in data.get("response", {}).get("profiles", []):
+                        if p.get("id") == owner_id:
+                            uploader = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip() or uploader
+                            break
+
+                # Resolve thumbnail
+                thumbnail_url = None
+                images = item.get("image", [])
+                if images:
+                    best_img = max(images, key=lambda x: (x.get("width", 0) * x.get("height", 0), x.get("width", 0)))
+                    thumbnail_url = clean_userapi_url(best_img.get("url", ""))
+
+                files = item.get("files", {})
+                stream_url = None
+                quality = None
+                is_hls = False
+
+                quality_preferences = [
+                    ("mp4_2160", "2160p"),
+                    ("mp4_1440", "1440p"),
+                    ("mp4_1080", "1080p"),
+                    ("mp4_720", "720p"),
+                    ("mp4_480", "480p"),
+                    ("mp4_360", "360p"),
+                    ("mp4_240", "240p"),
+                ]
+
+                for q_key, q_label in quality_preferences:
+                    if q_key in files and files[q_key]:
+                        stream_url = files[q_key]
+                        quality = q_label
+                        break
+
+                if not stream_url and "hls" in files and files["hls"]:
+                    stream_url = files["hls"]
+                    quality = "HLS"
+                    is_hls = True
+
+                if not stream_url and item.get("player"):
+                    stream_url = item["player"]
+                    quality = "player"
+                    is_hls = False
+
+                if not stream_url:
+                    logger.warning(f"No streamable URL found in VK video.get for {videos_param}")
+                    return None
+
+                return VKVideoData(
+                    url=url,
+                    video_id=video_id,
+                    title=title,
+                    duration=duration,
+                    uploader=uploader,
+                    thumbnail_url=thumbnail_url,
+                    stream_url=stream_url,
+                    is_hls=is_hls,
+                    quality=quality,
+                    files=files,
+                )
+        except Exception as e:
+            logger.error(f"Error querying VK API video.get for {url}: {e}")
+            return None
+
+    async def download_video(
+        self,
+        video_data: VKVideoData,
+        download_dir: Path,
+        progress_callback: Optional[Callable] = None
+    ) -> Tuple[Optional[Path], Optional[Path], int]:
+        """
+        Download video stream (direct MP4 via aiohttp or HLS via yt-dlp).
+        Returns (video_path, thumbnail_path, file_size).
+        """
+        download_dir.mkdir(parents=True, exist_ok=True)
+        task_id = str(uuid.uuid4())[:8]
+        safe_title = re.sub(r'[\\/*?:"<>|]', "", video_data.title)[:80].strip() or "video"
+        out_file = download_dir / f"{task_id}_{safe_title}.mp4"
+        thumb_file = download_dir / f"{task_id}_thumb.jpg"
+        thumb_path: Optional[Path] = None
+
+        # 1. Download thumbnail if available
+        if video_data.thumbnail_url:
+            try:
+                session = await http_client.get_session()
+                t_timeout = aiohttp.ClientTimeout(total=10)
+                async with session.get(video_data.thumbnail_url, headers=self.headers, proxy=settings.vk_proxy, timeout=t_timeout) as t_resp:
+                    if t_resp.status == 200:
+                        async with aiofiles.open(thumb_file, "wb") as tf:
+                            await tf.write(await t_resp.read())
+                        if thumb_file.exists() and thumb_file.stat().st_size > 0:
+                            thumb_path = await sanitize_image(thumb_file) or thumb_file
+            except Exception as te:
+                logger.debug(f"Failed to download VK video thumbnail: {te}")
+
+        # 2. Download video stream
+        if not video_data.stream_url:
+            raise ValueError("No stream URL available in VK video data")
+
+        if video_data.is_hls or video_data.stream_url.endswith(".m3u8"):
+            # Download HLS via yt-dlp
+            def _download_hls():
+                import yt_dlp
+                ydl_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "nocheckcertificate": True,
+                    "outtmpl": str(out_file),
+                    "concurrent_fragment_downloads": 8,
+                }
+                if settings.vk_proxy:
+                    ydl_opts["proxy"] = settings.vk_proxy
+
+                loop = None
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+
+                last_update = [0.0]
+
+                if progress_callback:
+                    def _hook(d: dict):
+                        now = time.time()
+                        if now - last_update[0] < 1.5 and d.get("status") != "finished":
+                            return
+                        last_update[0] = now
+                        status = d.get("status", "downloading")
+                        downloaded = d.get("downloaded_bytes", 0)
+                        total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
+                        percent = (downloaded / total * 100) if total > 0 else 0.0
+                        speed = d.get("speed") or 0.0
+                        eta = d.get("eta") or 0
+                        p = VKDownloadProgress(
+                            status=status,
+                            downloaded_bytes=downloaded,
+                            total_bytes=total,
+                            percent=percent,
+                            speed=speed,
+                            eta=int(eta)
+                        )
+                        try:
+                            if loop and asyncio.iscoroutinefunction(progress_callback):
+                                asyncio.run_coroutine_threadsafe(progress_callback(p), loop)
+                            else:
+                                progress_callback(p)
+                        except Exception:
+                            pass
+
+                    ydl_opts["progress_hooks"] = [_hook]
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([video_data.stream_url])
+
+            await asyncio.to_thread(_download_hls)
+        else:
+            # Direct MP4 stream download via aiohttp
+            session = await http_client.get_session()
+            timeout = aiohttp.ClientTimeout(total=1800)
+            proxy = settings.vk_proxy
+            async with session.get(video_data.stream_url, headers=self.headers, proxy=proxy, timeout=timeout) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"VK CDN stream returned HTTP {resp.status}")
+
+                total_bytes = int(resp.headers.get("Content-Length", 0))
+                if total_bytes > settings.max_file_size_bytes:
+                    raise ValueError(
+                        f"Размер видео превышает допустимый лимит ({total_bytes / (1024*1024):.1f} МБ > {settings.max_file_size_mb} МБ)"
+                    )
+
+                downloaded_bytes = 0
+                start_time = time.time()
+                last_update = [start_time]
+
+                async with aiofiles.open(out_file, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(1048576):
+                        await f.write(chunk)
+                        downloaded_bytes += len(chunk)
+
+                        if progress_callback:
+                            now = time.time()
+                            if now - last_update[0] >= 1.5 or (total_bytes and downloaded_bytes == total_bytes):
+                                last_update[0] = now
+                                elapsed = now - start_time
+                                speed = (downloaded_bytes / elapsed) if elapsed > 0 else 0.0
+                                eta = int((total_bytes - downloaded_bytes) / speed) if (speed > 0 and total_bytes > downloaded_bytes) else 0
+                                percent = (downloaded_bytes / total_bytes * 100) if total_bytes > 0 else 0.0
+
+                                p = VKDownloadProgress(
+                                    status="downloading",
+                                    downloaded_bytes=downloaded_bytes,
+                                    total_bytes=total_bytes,
+                                    percent=percent,
+                                    speed=speed,
+                                    eta=eta
+                                )
+                                try:
+                                    if asyncio.iscoroutinefunction(progress_callback):
+                                        await progress_callback(p)
+                                    else:
+                                        progress_callback(p)
+                                except Exception:
+                                    pass
+
+        if not out_file.exists() or out_file.stat().st_size == 0:
+            raise RuntimeError(f"Downloaded file {out_file} is empty or missing")
+
+        file_size = out_file.stat().st_size
+
+        # 3. Generate thumbnail if not downloaded from VK
+        if not thumb_path or not thumb_path.exists():
+            candidate_thumb = download_dir / f"{out_file.stem}_thumb.jpg"
+            gen_thumb = await generate_thumbnail(out_file, candidate_thumb, timestamp=1.0)
+            if gen_thumb and gen_thumb.exists():
+                thumb_path = gen_thumb
+
+        return out_file, thumb_path, file_size
 
 
 vk_service = VKService()
