@@ -62,13 +62,15 @@ async def resolve_vk_url(url: str, timeout_seconds: int = 10) -> str:
 
 def clean_userapi_url(url: str) -> str:
     """
-    Clean crop and thumbnail query parameters from VK userapi image URLs
+    Clean crop, blur and thumbnail query parameters from VK userapi image URLs
     to retrieve the maximum resolution image.
     """
     # Remove thumbnail crop param ?cs=... or &cs=...
     url = re.sub(r"[?&]cs=[^&]+", "", url)
     # Remove crop rectangle parameter ?crop=... or &crop=...
     url = re.sub(r"[?&]crop=[^&]+", "", url)
+    # Remove blur parameter ?blur=... or &blur=...
+    url = re.sub(r"[?&]blur=[^&]+", "", url)
     # If the query string was emptied leaving trailing '?' or '&', clean it up
     url = re.sub(r"\?&", "?", url)
     url = url.rstrip("?&")
@@ -76,6 +78,62 @@ def clean_userapi_url(url: str) -> str:
     if "?" not in url and "&" in url:
         url = url.replace("&", "?", 1)
     return url
+
+
+VK_SIZE_ORDER = {
+    "s": 1,
+    "m": 2,
+    "x": 3,
+    "o": 4,
+    "p": 5,
+    "q": 6,
+    "r": 7,
+    "y": 8,
+    "z": 9,
+    "w": 10,
+}
+
+
+def select_best_vk_photo(p: dict) -> Optional[str]:
+    """
+    Select the highest resolution unblurred image URL from a VK photo object.
+    VK web responses often place a blurred low-res placeholder in `orig_photo` (with blur=...),
+    while the crystal clear full-resolution versions are stored in `sizes`.
+    """
+    if not p:
+        return None
+
+    def _size_score(item: tuple[int, dict]) -> tuple:
+        idx, s = item
+        w = s.get("width") or 0
+        h = s.get("height") or 0
+        type_order = VK_SIZE_ORDER.get(s.get("type", ""), 0)
+        return (w * h, w, type_order, idx)
+
+    sizes = p.get("sizes", [])
+    # 1. Prefer unblurred size from `sizes` with the largest resolution
+    unblurred = [(idx, s) for idx, s in enumerate(sizes) if isinstance(s, dict) and "blur=" not in s.get("url", "")]
+    if unblurred:
+        best = max(unblurred, key=_size_score)[1]
+        if best.get("url"):
+            return clean_userapi_url(best["url"])
+
+    # 2. Check orig_photo if not blurred
+    orig = p.get("orig_photo", {}).get("url")
+    if orig and "blur=" not in orig:
+        return clean_userapi_url(orig)
+
+    # 3. Fallback to any largest size in sizes
+    if sizes:
+        enumerated_sizes = list(enumerate(sizes))
+        best_fallback = max(enumerated_sizes, key=_size_score)[1]
+        if best_fallback.get("url"):
+            return clean_userapi_url(best_fallback["url"])
+
+    if orig:
+        return clean_userapi_url(orig)
+
+    return None
 
 
 def strip_html_tags(text: str) -> str:
@@ -264,13 +322,9 @@ class VKService:
                         att_type = att.get("type")
                         if att_type == "photo":
                             p = att.get("photo", {})
-                            orig = p.get("orig_photo", {}).get("url")
-                            if orig:
-                                image_urls.append(clean_userapi_url(orig))
-                            elif p.get("sizes"):
-                                best = p["sizes"][-1].get("url")
-                                if best:
-                                    image_urls.append(clean_userapi_url(best))
+                            best_url = select_best_vk_photo(p)
+                            if best_url:
+                                image_urls.append(best_url)
                         elif att_type == "video" and not video_url:
                             v = att.get("video", {})
                             vid_owner = v.get("owner_id")
@@ -364,17 +418,9 @@ class VKService:
                         att_type = att.get("type")
                         if att_type == "photo":
                             p = att.get("photo", {})
-                            orig = p.get("orig_photo", {}).get("url")
-                            if orig:
-                                clean = clean_userapi_url(orig)
-                                if clean not in image_urls:
-                                    image_urls.append(clean)
-                            elif p.get("sizes"):
-                                best = p["sizes"][-1].get("url")
-                                if best:
-                                    clean = clean_userapi_url(best)
-                                    if clean not in image_urls:
-                                        image_urls.append(clean)
+                            best_url = select_best_vk_photo(p)
+                            if best_url and best_url not in image_urls:
+                                image_urls.append(best_url)
                         elif att_type == "video" and not video_url:
                             v = att.get("video", {})
                             vid_owner = v.get("owner_id")
@@ -404,7 +450,7 @@ class VKService:
         # Extract photos from background-image of post container or grid (e.g. multi-photo albums)
         bg_matches = re.findall(r"background-image:\s*url\(['\"]?(https://[^'\"\)]+)['\"]?\)", html_content)
         for bg in bg_matches:
-            if "userapi.com" in bg:
+            if "userapi.com" in bg and "blur=" not in bg:
                 clean = clean_userapi_url(bg)
                 if clean not in image_urls:
                     image_urls.append(clean)
@@ -461,12 +507,7 @@ class VKService:
                         if items:
                             item = items[0]
                             text = strip_html_tags(item.get("text", ""))
-                            orig = item.get("orig_photo", {}).get("url")
-                            best_url = None
-                            if orig:
-                                best_url = clean_userapi_url(orig)
-                            elif item.get("sizes"):
-                                best_url = clean_userapi_url(item["sizes"][-1].get("url", ""))
+                            best_url = select_best_vk_photo(item)
 
                             if best_url:
                                 return VKPostData(

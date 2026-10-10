@@ -364,10 +364,16 @@ class DownloaderService:
                 "checkpoint_required",
                 "confirm you are not a robot",
                 "this content is unreachable",
-                "use --cookies"
+                "use --cookies",
+                "only available for registered users",
+                "video only available to signed-in users",
+                "video only available to followers"
             ]):
-                is_story = platform == Platform.INSTAGRAM and "/stories/" in url
-                err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else ("AUTH_REQUIRED_INSTAGRAM" if platform == Platform.INSTAGRAM else "AUTH_REQUIRED")
+                if platform == Platform.VK:
+                    err_code = "AUTH_REQUIRED_VK"
+                else:
+                    is_story = platform == Platform.INSTAGRAM and "/stories/" in url
+                    err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else ("AUTH_REQUIRED_INSTAGRAM" if platform == Platform.INSTAGRAM else "AUTH_REQUIRED")
                 return MediaInfo(
                     title="Требуется авторизация",
                     duration=0,
@@ -803,8 +809,20 @@ class DownloaderService:
                     logger.error(f"TikTok fallback download failed: {te}")
 
             error_msg = None
-            if any(term in err_str for term in ["you need to log in", "login required", "checkpoint_required"]):
-                error_msg = "AUTH_REQUIRED_INSTAGRAM" if platform == Platform.INSTAGRAM else "AUTH_REQUIRED"
+            if any(term in err_str for term in [
+                "you need to log in",
+                "login required",
+                "checkpoint_required",
+                "only available for registered users",
+                "video only available to signed-in users",
+                "video only available to followers"
+            ]):
+                if platform == Platform.INSTAGRAM:
+                    error_msg = "AUTH_REQUIRED_INSTAGRAM"
+                elif platform == Platform.VK:
+                    error_msg = "AUTH_REQUIRED_VK"
+                else:
+                    error_msg = "AUTH_REQUIRED"
 
             return MediaInfo(
                 title="Error",

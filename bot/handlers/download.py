@@ -447,6 +447,13 @@ async def handle_text_message(message: types.Message):
                 "<i>После загрузки cookies бот сможет скачивать любые истории и закрытый контент.</i>"
             )
             return
+        elif info.error_message == "AUTH_REQUIRED_VK":
+            await update_status_safely(
+                status_msg,
+                "🔒 <b>Это видео ВКонтакте доступно только авторизованным пользователям или ограничено автором.</b>\n\n"
+                "Автор видео установил настройки приватности (просмотр только для друзей или зарегистрированных пользователей)."
+            )
+            return
         elif info.error_message == "AUTH_REQUIRED":
             await update_status_safely(
                 status_msg,
@@ -660,6 +667,12 @@ async def run_download_task(
                         status_msg,
                         "🔒 <b>Для скачивания историй Instagram требуется авторизация (cookies).</b>\n\n"
                         "Отправьте файл <code>cookies.txt</code> прямо в этот чат для активации доступа."
+                    )
+                elif media.error_message == "AUTH_REQUIRED_VK":
+                    await update_status_safely(
+                        status_msg,
+                        "🔒 <b>Это видео ВКонтакте доступно только авторизованным пользователям или ограничено автором.</b>\n\n"
+                        "Автор видео установил настройки приватности (просмотр только для друзей или зарегистрированных пользователей)."
                     )
                 else:
                     await update_status_safely(status_msg, "❌ <b>Требуется авторизация для доступа к этому медиа.</b>")
