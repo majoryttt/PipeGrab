@@ -154,13 +154,13 @@ async def send_media_album_robust(
     """
     chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
     for chunk_idx, chunk in enumerate(chunks):
-        files_in_chunk = list(chunk)
+        album_prefix = "🔵" if platform_name == "VK" else ("📸" if platform_name == "Instagram" else "📌")
         chunk_caption = (
             build_safe_caption(
                 title=title,
                 url=url,
                 platform_name=platform_name,
-                prefix="📌",
+                prefix=album_prefix,
                 extra=f"({len(valid_files)} медиа)"
             )
             if chunk_idx == 0 else None
@@ -701,13 +701,13 @@ async def run_download_task(
                 )
 
                 try:
-                    if media.media_type == MediaType.PHOTO:
+                        photo_prefix = "🔵" if platform_title == "VK" else ("📸" if platform_title == "Instagram" else "📌")
                         p_caption = build_safe_caption(
                             title=media.title,
                             url=url,
                             platform_name=platform_title,
                             uploader=media.uploader,
-                            prefix="📌"
+                            prefix=photo_prefix
                         )
                         await status_msg.bot.send_photo(
                             chat_id=chat_id,

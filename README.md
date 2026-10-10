@@ -10,6 +10,7 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
 - **Instagram**: Reels, video posts, **single photos**, **photo carousels and albums**, and **Stories** (via cookies).
 - **Twitter / X**: Videos and clips.
 - **Pinterest**: Original quality photos, albums/carousels (Idea Pins), animated GIFs, videos, and boards.
+- **VK (VKontakte)**: Videos, clips (Reels), wall posts with photos, albums/carousels, single photos, and vkvideo.ru / vk.cc links.
 
 ---
 
@@ -19,11 +20,15 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
   - Direct watermark-free TikTok streaming straight from CDN in fractions of a second with zero FFmpeg overhead.
   - Parallel downloading of albums, carousels, and stories via `asyncio.gather`.
   - Persistent HTTP connection pool with Keep-Alive and DNS caching.
-- **Smart Link Detection**: Simply send a link to the chat (shortened URLs like `vt.tiktok.com`, `pin.it`, `youtu.be` are fully supported).
+- **Smart Link Detection**: Simply send a link to the chat (shortened URLs like `vt.tiktok.com`, `pin.it`, `vk.cc`, `youtu.be` are fully supported).
 - **Auto-Delete Source Link for Chat Cleanliness**:
   - Automatically deletes the user's message with the link and the bot's status message after successful delivery (in a single batch call with zero delay).
   - If the download fails, the link message is preserved for easy editing.
   - Configurable via `DELETE_SOURCE_MESSAGE` in `.env`.
+- **Full VK (VKontakte) Support**:
+  - High-speed video and clip downloads without requiring logins or API keys.
+  - Wall post processing: extracts full-resolution photos, multi-photo albums/carousels (sent as Telegram media groups), or attached videos with post text captions.
+  - Automatic `vk.cc` shortened link resolution.
 - **Full TikTok Support**:
   - Original quality video downloads without watermarks.
   - Photo post support (`/photo/`): extracts all original high-resolution photos into a Telegram media group and attaches the audio track separately.

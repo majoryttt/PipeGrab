@@ -16,6 +16,7 @@ from bot.services.ffmpeg_utils import get_video_metadata, generate_thumbnail
 from bot.services.pinterest import pinterest_service, is_pinterest_url
 from bot.services.tiktok import tiktok_service, is_tiktok_url, resolve_tiktok_url
 from bot.services.instagram import instagram_service, is_instagram_url, clean_instagram_url
+from bot.services.vk import vk_service, is_vk_url, resolve_vk_url
 from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class Platform(str, Enum):
     INSTAGRAM = "Instagram"
     TWITTER = "Twitter/X"
     PINTEREST = "Pinterest"
+    VK = "VK"
     UNKNOWN = "Unknown"
 
 
@@ -62,6 +64,11 @@ PLATFORM_PATTERNS = {
         r'(?:https?://)?(?:www\.|[a-z]{2}\.)?pinterest\.[a-z.]+/[^/\s]+/[^/\s]+',
         r'(?:https?://)?pin\.it/'
     ],
+    Platform.VK: [
+        r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?vk\.com/',
+        r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?vkvideo\.ru/',
+        r'(?:https?://)?vk\.cc/',
+    ],
 }
 
 
@@ -83,6 +90,8 @@ def detect_platform(url: str) -> Platform:
                 return platform
     if is_pinterest_url(url):
         return Platform.PINTEREST
+    if is_vk_url(url):
+        return Platform.VK
     return Platform.UNKNOWN
 
 
@@ -133,7 +142,7 @@ class DownloaderService:
         if not info.error_message:
             self._cache[url] = (time.time(), info)
 
-    def _get_base_ydl_opts(self) -> Dict[str, Any]:
+    def _get_base_ydl_opts(self, platform: Optional[Platform] = None, use_cookies: bool = True) -> Dict[str, Any]:
         opts: Dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
@@ -153,7 +162,11 @@ class DownloaderService:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
         }
-        if settings.has_cookies:
+        # For VK, anonymous requests are more reliable by default because exported cookies often have expired sessions
+        if platform == Platform.VK and not use_cookies:
+            return opts
+
+        if settings.has_cookies and use_cookies:
             opts["cookiefile"] = str(settings.cookies_file)
         return opts
 
@@ -261,15 +274,63 @@ class DownloaderService:
                 error_message="AUTH_REQUIRED_INSTAGRAM_STORY"
             )
 
-        # 5. Generic yt-dlp extraction
-        def _extract():
-            ydl_opts = self._get_base_ydl_opts()
+        # 5. Specialized VK handler for wall posts, carousels, and photos
+        if platform == Platform.VK:
+            url = await resolve_vk_url(url)
+            vk_type, vk_id = vk_service.parse_vk_url_type(url)
+            if vk_type == "wall":
+                try:
+                    vk_data = await vk_service.extract_wall_post(url)
+                    if vk_data:
+                        if vk_data.media_type in ["photo", "album"]:
+                            media_type = MediaType.PHOTO if vk_data.media_type == "photo" else MediaType.ALBUM
+                            return MediaInfo(
+                                title=vk_data.text or "Пост ВКонтакте",
+                                duration=0,
+                                uploader=vk_data.uploader,
+                                is_playlist=False,
+                                playlist_count=0,
+                                platform=Platform.VK,
+                                url=vk_data.url,
+                                media_type=media_type
+                            )
+                        elif vk_data.media_type == "video" and vk_data.video_url:
+                            url = vk_data.video_url
+                except Exception as ve:
+                    logger.warning(f"VK wall post extractor failed for {url}: {ve}")
+            elif vk_type == "photo":
+                try:
+                    vk_data = await vk_service.extract_photo(url)
+                    if vk_data:
+                        return MediaInfo(
+                            title=vk_data.text or "Фото ВКонтакте",
+                            duration=0,
+                            uploader=vk_data.uploader,
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.VK,
+                            url=vk_data.url,
+                            media_type=MediaType.PHOTO
+                        )
+                except Exception as ve:
+                    logger.warning(f"VK photo extractor failed for {url}: {ve}")
+
+        # 6. Generic yt-dlp extraction
+        def _extract(use_cookies: bool = True):
+            ydl_opts = self._get_base_ydl_opts(platform=platform, use_cookies=use_cookies)
             ydl_opts["extract_flat"] = "in_playlist"
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 return ydl.extract_info(url, download=False)
 
         try:
-            info = await asyncio.to_thread(_extract)
+            initial_use_cookies = (platform != Platform.VK)
+            try:
+                info = await asyncio.to_thread(_extract, initial_use_cookies)
+            except Exception as first_err:
+                if platform == Platform.VK and settings.has_cookies and not initial_use_cookies:
+                    info = await asyncio.to_thread(_extract, True)
+                else:
+                    raise first_err
             if not info:
                 return None
 
@@ -462,7 +523,47 @@ class DownloaderService:
             except Exception as ie:
                 logger.warning(f"Instagram direct download failed for {url}: {ie}")
 
-        # 4. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, and Pinterest videos)
+        # 4. Specialized VK handler for wall posts (photos/carousels) and single photos
+        if platform == Platform.VK:
+            url = await resolve_vk_url(url)
+            vk_type, vk_id = vk_service.parse_vk_url_type(url)
+            if vk_type in ["wall", "photo"]:
+                try:
+                    vk_data = None
+                    if vk_type == "wall":
+                        vk_data = await vk_service.extract_wall_post(url)
+                    elif vk_type == "photo":
+                        vk_data = await vk_service.extract_photo(url)
+
+                    if vk_data:
+                        if vk_data.media_type in ["photo", "album"] and vk_data.image_urls:
+                            files, caption, final_type = await vk_service.download_post(
+                                vk_data,
+                                self.download_dir,
+                                progress_callback=progress_callback
+                            )
+                            if files:
+                                total_size = sum(f.stat().st_size for f in files if f.exists())
+                                return MediaInfo(
+                                    title=caption or "ВКонтакте",
+                                    duration=0,
+                                    uploader=vk_data.uploader,
+                                    is_playlist=False,
+                                    playlist_count=0,
+                                    platform=Platform.VK,
+                                    url=url,
+                                    media_type=MediaType(final_type),
+                                    file_path=files[0],
+                                    file_paths=files,
+                                    file_size=total_size
+                                )
+                        elif vk_data.media_type == "video" and vk_data.video_url:
+                            # If wall post contains video, switch to video url and proceed to yt-dlp
+                            url = vk_data.video_url
+                except Exception as ve:
+                    logger.warning(f"VK post direct download failed for {url}: {ve}")
+
+        # 5. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, VK, and Pinterest videos)
         task_id = str(uuid.uuid4())[:8]
         out_template = str(self.download_dir / f"{task_id}_%(title).100B.%(ext)s")
 
@@ -502,35 +603,43 @@ class DownloaderService:
             except Exception as cb_err:
                 logger.debug(f"Progress hook dispatch error: {cb_err}")
 
-        ydl_opts = self._get_base_ydl_opts()
-        ydl_opts.update({
-            "outtmpl": out_template,
-            "progress_hooks": [ydl_progress_hook],
-            "noplaylist": True,
-        })
-
-        if audio_only:
-            ydl_opts.update({
-                "format": "bestaudio/best",
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }],
+        def _build_ydl_opts(use_cookies: bool) -> dict:
+            opts = self._get_base_ydl_opts(platform=platform, use_cookies=use_cookies)
+            opts.update({
+                "outtmpl": out_template,
+                "progress_hooks": [ydl_progress_hook],
+                "noplaylist": True,
             })
-        else:
-            # Prefer fast MP4 download without FFmpeg merge if single stream available
-            ydl_opts.update({
-                "format": "best[ext=mp4]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]/bestvideo+bestaudio/best",
-                "merge_output_format": "mp4",
-            })
+            if audio_only:
+                opts.update({
+                    "format": "bestaudio/best",
+                    "postprocessors": [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }],
+                })
+            else:
+                opts.update({
+                    "format": "best[ext=mp4]/bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]/bestvideo+bestaudio/best",
+                    "merge_output_format": "mp4",
+                })
+            return opts
 
-        def _download():
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        def _download(use_cookies: bool = True):
+            opts = _build_ydl_opts(use_cookies)
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 return ydl.extract_info(url, download=True)
 
         try:
-            info = await asyncio.to_thread(_download)
+            initial_use_cookies = (platform != Platform.VK)
+            try:
+                info = await asyncio.to_thread(_download, initial_use_cookies)
+            except Exception as dl_err:
+                if platform == Platform.VK and settings.has_cookies and not initial_use_cookies:
+                    info = await asyncio.to_thread(_download, True)
+                else:
+                    raise dl_err
             if not info:
                 return None
 

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     cookies_file: Path = Path("data/cookies/cookies.txt")
     downloads_dir: Path = Path("downloads")
     delete_source_message: bool = True
+    vk_service_token: Optional[str] = None
 
     @property
     def max_file_size_bytes(self) -> int:
