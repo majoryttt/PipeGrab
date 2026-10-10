@@ -670,18 +670,27 @@ class VKService:
         final_type = "photo" if len(downloaded_files) == 1 else "album"
         return downloaded_files, post_data.text, final_type
 
-    async def extract_video(self, url: str) -> Optional[VKVideoData]:
+    async def extract_video_api(
+        self,
+        url: str,
+        video_id: Optional[str] = None,
+        access_key: Optional[str] = None
+    ) -> Optional[VKVideoData]:
         """
         Extract video information and stream URLs using official VK API (video.get).
         Requires settings.active_vk_token (user access token or service token).
         """
         token = settings.active_vk_token
         if not token:
-            logger.debug("No VK token available for extract_video")
+            logger.debug("No VK token available for extract_video_api")
             return None
 
-        url = await resolve_vk_url(url)
-        video_id, access_key = self.parse_vk_video_target(url)
+        if not video_id:
+            url = await resolve_vk_url(url)
+            video_id, parsed_ak = self.parse_vk_video_target(url)
+            if not access_key:
+                access_key = parsed_ak
+
         if not video_id:
             logger.debug(f"Could not parse VK video ID from {url}")
             return None
@@ -792,6 +801,226 @@ class VKService:
             logger.error(f"Error querying VK API video.get for {url}: {e}")
             return None
 
+    async def extract_video_web(
+        self,
+        url: str,
+        video_id: Optional[str] = None,
+        access_key: Optional[str] = None
+    ) -> Optional[VKVideoData]:
+        """
+        Extract video information and stream URLs directly from VK web player (al_video.php)
+        using session cookies (cookies.txt). Does not require official API tokens or proxies.
+        """
+        if not video_id:
+            url = await resolve_vk_url(url)
+            video_id, parsed_ak = self.parse_vk_video_target(url)
+            if not access_key:
+                access_key = parsed_ak
+
+        if not video_id:
+            logger.debug(f"Could not parse VK video ID from {url}")
+            return None
+
+        video_param = f"{video_id}_{access_key}" if access_key else video_id
+        endpoint = "https://vk.com/al_video.php?act=show"
+        data = {
+            "act": "show",
+            "al": "1",
+            "video": video_param,
+        }
+        if access_key:
+            data["list"] = access_key
+
+        headers = {
+            **self.headers,
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"https://vk.com/video{video_param}",
+            "Origin": "https://vk.com",
+        }
+        cookies = self.get_cookies()
+        proxy = settings.vk_proxy
+
+        try:
+            session = await http_client.get_session()
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with session.post(
+                endpoint,
+                data=data,
+                headers=headers,
+                cookies=cookies or None,
+                proxy=proxy,
+                timeout=timeout,
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"VK al_video.php returned HTTP {resp.status} for {video_param}")
+                    return None
+                text = await resp.text()
+
+            clean_text = text.strip()
+            if clean_text.startswith("<!--<!json>"):
+                clean_text = clean_text[len("<!--<!json>"):]
+            elif clean_text.startswith("<!json>"):
+                clean_text = clean_text[len("<!json>"):]
+            if clean_text.endswith("<!--<!>"):
+                clean_text = clean_text[:-len("<!--<!>")].strip()
+            elif clean_text.endswith("<!>"):
+                clean_text = clean_text[:-len("<!>")].strip()
+
+            p0: Dict[str, Any] = {}
+            title = "Видео ВКонтакте"
+            uploader = "ВКонтакте"
+
+            try:
+                j = json.loads(clean_text)
+                payload = j.get("payload", [])
+                if len(payload) > 1 and isinstance(payload[1], list):
+                    if payload[1] and isinstance(payload[1][0], str) and payload[1][0].strip():
+                        title = strip_html_tags(payload[1][0].strip())
+                    for item in payload[1]:
+                        if isinstance(item, dict) and "player" in item:
+                            params = item["player"].get("params", [])
+                            if params and isinstance(params, list) and isinstance(params[0], dict):
+                                p0 = params[0]
+                                break
+            except Exception as je:
+                logger.debug(f"Direct JSON parse of al_video.php failed, will use regex fallback: {je}")
+
+            # Title
+            raw_title = p0.get("md_title") or p0.get("title")
+            if raw_title:
+                title = strip_html_tags(raw_title)
+            elif title == "Видео ВКонтакте":
+                m_title = re.search(r'"md_title"\s*:\s*"([^"]+)"', text)
+                if m_title:
+                    try:
+                        title = strip_html_tags(m_title.group(1).encode().decode("unicode-escape", errors="ignore"))
+                    except Exception:
+                        title = strip_html_tags(m_title.group(1))
+
+            # Uploader
+            raw_author = p0.get("md_author") or p0.get("author")
+            if raw_author:
+                uploader = strip_html_tags(raw_author)
+            elif uploader == "ВКонтакте":
+                m_auth = re.search(r'"md_author"\s*:\s*"([^"]+)"', text)
+                if m_auth:
+                    try:
+                        uploader = strip_html_tags(m_auth.group(1).encode().decode("unicode-escape", errors="ignore"))
+                    except Exception:
+                        uploader = strip_html_tags(m_auth.group(1))
+
+            # Duration
+            duration = int(p0.get("duration") or 0)
+            if duration == 0:
+                m_dur = re.search(r'"duration"\s*:\s*(\d+)', text)
+                if m_dur:
+                    duration = int(m_dur.group(1))
+
+            # Thumbnail
+            thumbnail_url = p0.get("jpg") or p0.get("thumb")
+            if thumbnail_url:
+                thumbnail_url = thumbnail_url.replace(r"\/", "/")
+            else:
+                m_thumb = re.search(r'"(?:jpg|thumb)"\s*:\s*"([^"]+)"', text)
+                if m_thumb:
+                    thumbnail_url = m_thumb.group(1).replace(r"\/", "/")
+                else:
+                    m_prev = re.search(r'background-image:\s*url\((https:[^)]+)\)', text)
+                    if m_prev:
+                        thumbnail_url = m_prev.group(1).replace(r"\/", "/")
+
+            if thumbnail_url:
+                thumbnail_url = clean_userapi_url(thumbnail_url)
+
+            # Files / stream URLs
+            files: Dict[str, str] = {}
+            for k, v in p0.items():
+                if (k.startswith("url") or k in ("hls", "dash_sep")) and isinstance(v, str):
+                    files[k] = v.replace(r"\/", "/")
+
+            if not files:
+                url_matches = re.findall(r'"(url\d+|hls|dash_sep)"\s*:\s*"([^"]+)"', text)
+                for k, v in url_matches:
+                    files[k] = v.replace(r"\/", "/")
+
+            stream_url = None
+            quality = None
+            is_hls = False
+
+            quality_preferences = [
+                ("url2160", "2160p"),
+                ("url1440", "1440p"),
+                ("url1080", "1080p"),
+                ("url720", "720p"),
+                ("url480", "480p"),
+                ("url360", "360p"),
+                ("url240", "240p"),
+                ("url144", "144p"),
+            ]
+
+            for q_key, q_label in quality_preferences:
+                if q_key in files and files[q_key]:
+                    stream_url = files[q_key]
+                    quality = q_label
+                    break
+
+            if not stream_url and "hls" in files and files["hls"]:
+                stream_url = files["hls"]
+                quality = "HLS"
+                is_hls = True
+
+            if not stream_url:
+                logger.warning(f"No streamable URL found in VK al_video.php for {video_param}")
+                return None
+
+            return VKVideoData(
+                url=url,
+                video_id=video_id,
+                title=title,
+                duration=duration,
+                uploader=uploader,
+                thumbnail_url=thumbnail_url,
+                stream_url=stream_url,
+                is_hls=is_hls,
+                quality=quality,
+                files=files,
+            )
+        except Exception as e:
+            logger.error(f"Error querying VK al_video.php for {url}: {e}")
+            return None
+
+    async def extract_video(self, url: str) -> Optional[VKVideoData]:
+        """
+        Extract video information and stream URLs.
+        First attempts official VK API (video.get) if an active token is configured.
+        Falls back to web player extractor (al_video.php) using session cookies.
+        """
+        url = await resolve_vk_url(url)
+        video_id, access_key = self.parse_vk_video_target(url)
+        if not video_id:
+            logger.debug(f"Could not parse VK video ID from {url}")
+            return None
+
+        # 1. Try official VK API if token is configured
+        if settings.active_vk_token:
+            try:
+                api_result = await self.extract_video_api(url, video_id=video_id, access_key=access_key)
+                if api_result and api_result.stream_url:
+                    return api_result
+            except Exception as e:
+                logger.warning(f"VK API video extraction failed for {url}, falling back to web: {e}")
+
+        # 2. Fallback to web player extraction via al_video.php (using cookies)
+        try:
+            web_result = await self.extract_video_web(url, video_id=video_id, access_key=access_key)
+            if web_result and web_result.stream_url:
+                return web_result
+        except Exception as e:
+            logger.warning(f"VK web video extraction failed for {url}: {e}")
+
+        return None
+
     async def download_video(
         self,
         video_data: VKVideoData,
@@ -808,13 +1037,17 @@ class VKService:
         out_file = download_dir / f"{task_id}_{safe_title}.mp4"
         thumb_file = download_dir / f"{task_id}_thumb.jpg"
         thumb_path: Optional[Path] = None
+        stream_headers = {
+            **self.headers,
+            "Referer": f"https://vk.com/video{video_data.video_id}",
+        }
 
         # 1. Download thumbnail if available
         if video_data.thumbnail_url:
             try:
                 session = await http_client.get_session()
                 t_timeout = aiohttp.ClientTimeout(total=10)
-                async with session.get(video_data.thumbnail_url, headers=self.headers, proxy=settings.vk_proxy, timeout=t_timeout) as t_resp:
+                async with session.get(video_data.thumbnail_url, headers=stream_headers, proxy=settings.vk_proxy, timeout=t_timeout) as t_resp:
                     if t_resp.status == 200:
                         async with aiofiles.open(thumb_file, "wb") as tf:
                             await tf.write(await t_resp.read())
@@ -837,6 +1070,7 @@ class VKService:
                     "nocheckcertificate": True,
                     "outtmpl": str(out_file),
                     "concurrent_fragment_downloads": 8,
+                    "http_headers": stream_headers,
                 }
                 if settings.vk_proxy:
                     ydl_opts["proxy"] = settings.vk_proxy
@@ -888,7 +1122,7 @@ class VKService:
             session = await http_client.get_session()
             timeout = aiohttp.ClientTimeout(total=1800)
             proxy = settings.vk_proxy
-            async with session.get(video_data.stream_url, headers=self.headers, proxy=proxy, timeout=timeout) as resp:
+            async with session.get(video_data.stream_url, headers=stream_headers, proxy=proxy, timeout=timeout) as resp:
                 if resp.status != 200:
                     raise RuntimeError(f"VK CDN stream returned HTTP {resp.status}")
 
