@@ -32,25 +32,32 @@ VK_HEADERS = {
 def is_vk_url(url: str) -> bool:
     parsed = urlparse(url)
     netloc = parsed.netloc.lower()
-    return any(d in netloc for d in ["vk.com", "vkvideo.ru", "vk.cc"])
+    return any(d in netloc for d in ["vk.com", "vk.ru", "vkvideo.ru", "vk.cc"])
 
 
 async def resolve_vk_url(url: str, timeout_seconds: int = 10) -> str:
-    """Follow redirects to get canonical VK URL (e.g. from vk.cc)."""
+    """Follow redirects to get canonical VK URL (e.g. from vk.cc) and normalize vk.ru to vk.com."""
     parsed = urlparse(url)
-    if "vk.cc" not in parsed.netloc.lower():
-        return url
+    netloc = parsed.netloc.lower()
+    if "vk.cc" in netloc:
+        try:
+            session = await http_client.get_session()
+            timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+            async with session.get(url, headers=VK_HEADERS, allow_redirects=True, timeout=timeout) as resp:
+                final_url = str(resp.url)
+                logger.info(f"Resolved vk.cc redirect '{url}' -> '{final_url}'")
+                url = final_url
+                parsed = urlparse(url)
+                netloc = parsed.netloc.lower()
+        except Exception as e:
+            logger.warning(f"Failed to resolve vk.cc redirect for {url}: {e}")
 
-    try:
-        session = await http_client.get_session()
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-        async with session.get(url, headers=VK_HEADERS, allow_redirects=True, timeout=timeout) as resp:
-            final_url = str(resp.url)
-            logger.info(f"Resolved vk.cc redirect '{url}' -> '{final_url}'")
-            return final_url
-    except Exception as e:
-        logger.warning(f"Failed to resolve vk.cc redirect for {url}: {e}")
-        return url
+    # Normalize vk.ru domains to vk.com for maximum compatibility with yt-dlp and extractors
+    if netloc == "vk.ru" or netloc.endswith(".vk.ru"):
+        new_netloc = netloc.replace("vk.ru", "vk.com")
+        url = url.replace(parsed.netloc, new_netloc, 1)
+
+    return url
 
 
 def clean_userapi_url(url: str) -> str:
@@ -191,7 +198,10 @@ class VKService:
 
                 # Parse JSON payload
                 try:
-                    res = json.loads(text)
+                    clean_text = text.strip()
+                    if clean_text.startswith("<!--"):
+                        clean_text = clean_text[4:].strip()
+                    res = json.loads(clean_text)
                     payload = res.get("payload", [])
                     if len(payload) > 1 and isinstance(payload[1], list) and len(payload[1]) > 1:
                         # payload[1][1] is HTML
@@ -319,12 +329,13 @@ class VKService:
         image_urls: List[str] = []
         video_url: Optional[str] = None
 
-        data_exec_matches = re.findall(r"data-exec=[\"']({.*?})[\"']", html_content)
+        data_exec_matches = re.findall(r"data-exec=[\"'](.*?)[\"']", html_content)
         for raw_json in data_exec_matches:
             try:
                 unescaped = html.unescape(raw_json)
-                if "PostContentContainer/init" in unescaped:
-                    parsed = json.loads(unescaped)
+                if "PostContentContainer" in unescaped:
+                    unescaped_clean = unescaped.replace(r"\/", "/")
+                    parsed = json.loads(unescaped_clean)
                     init_data = parsed.get("PostContentContainer/init", {})
                     item = init_data.get("item", {})
                     text = strip_html_tags(item.get("text", ""))
@@ -355,11 +366,15 @@ class VKService:
                             p = att.get("photo", {})
                             orig = p.get("orig_photo", {}).get("url")
                             if orig:
-                                image_urls.append(clean_userapi_url(orig))
+                                clean = clean_userapi_url(orig)
+                                if clean not in image_urls:
+                                    image_urls.append(clean)
                             elif p.get("sizes"):
                                 best = p["sizes"][-1].get("url")
                                 if best:
-                                    image_urls.append(clean_userapi_url(best))
+                                    clean = clean_userapi_url(best)
+                                    if clean not in image_urls:
+                                        image_urls.append(clean)
                         elif att_type == "video" and not video_url:
                             v = att.get("video", {})
                             vid_owner = v.get("owner_id")
@@ -370,24 +385,34 @@ class VKService:
             except Exception as e:
                 logger.debug(f"Error parsing data-exec: {e}")
 
-        # 3. Fallback: Regex extraction if data-exec was not present or empty
-        if not image_urls and not video_url:
-            # Extract post caption
+        # Also look up author name from HTML header if not resolved yet
+        if uploader == "ВКонтакте":
+            author_span_m = re.search(r'class="[^"]*PostHeaderTitle__authorName[^"]*"[^>]*>(.*?)</span>', html_content)
+            if author_span_m:
+                uploader = strip_html_tags(author_span_m.group(1)).strip() or uploader
+            else:
+                author_a_m = re.search(r'class="[^"]*author[^"]*"[^>]*>(.*?)</a>', html_content)
+                if author_a_m:
+                    uploader = strip_html_tags(author_a_m.group(1)).strip() or uploader
+
+        # Extract post caption if still empty
+        if not text:
             post_text_m = re.search(r'<div class="[^"]*wall_post_text[^"]*"[^>]*>(.*?)</div>', html_content, re.DOTALL)
             if post_text_m:
                 text = strip_html_tags(post_text_m.group(1))
 
-            # Extract photos from background-image of post container or showPhoto
-            bg_matches = re.findall(r"background-image:\s*url\((https://[^\)]+)\)", html_content)
-            for bg in bg_matches:
-                if "userapi.com" in bg:
-                    clean = clean_userapi_url(bg)
-                    if clean not in image_urls:
-                        image_urls.append(clean)
+        # Extract photos from background-image of post container or grid (e.g. multi-photo albums)
+        bg_matches = re.findall(r"background-image:\s*url\(['\"]?(https://[^'\"\)]+)['\"]?\)", html_content)
+        for bg in bg_matches:
+            if "userapi.com" in bg:
+                clean = clean_userapi_url(bg)
+                if clean not in image_urls:
+                    image_urls.append(clean)
 
-            # Extract video links
+        # Extract video links if not already found
+        if not video_url:
             vid_matches = re.findall(r'href=[\"\'](/video-?\d+_\d+[^\"\']*)[\"\']', html_content)
-            if vid_matches and not video_url:
+            if vid_matches:
                 v_clean = vid_matches[0].split("?")[0]
                 video_url = f"https://vk.com{v_clean}"
 

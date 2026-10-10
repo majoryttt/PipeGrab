@@ -65,7 +65,7 @@ PLATFORM_PATTERNS = {
         r'(?:https?://)?pin\.it/'
     ],
     Platform.VK: [
-        r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?vk\.com/',
+        r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?vk\.(?:com|ru)/',
         r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?vkvideo\.ru/',
         r'(?:https?://)?vk\.cc/',
     ],
