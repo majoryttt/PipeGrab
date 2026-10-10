@@ -64,6 +64,35 @@ def parse_cookie_services(content: str) -> List[str]:
     return services
 
 
+def sanitize_netscape_content(content: str) -> str:
+    """
+    Ensure all lines in Netscape cookies file strictly adhere to Netscape specification:
+    Column 2 (flag) must be 'TRUE' if the domain begins with a dot (subdomain matching allowed),
+    and 'FALSE' if host-only.
+    Python's http.cookiejar asserts `assert domain_specified == initial_dot` and
+    fails with an AssertionError / LoadError if this invariant is broken.
+    """
+    if not content:
+        return content
+
+    cleaned = []
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            cleaned.append(line)
+            continue
+        parts = stripped.split("\t")
+        if len(parts) >= 7:
+            domain = parts[0]
+            # Enforce domain_specified == initial_dot
+            parts[1] = "TRUE" if domain.startswith(".") else "FALSE"
+            cleaned.append("\t".join(parts))
+        else:
+            cleaned.append(line)
+
+    return "\n".join(cleaned) + ("\n" if content.endswith("\n") else "")
+
+
 def normalize_vk_cookies_content(content: str) -> str:
     """
     Ensure essential VK authentication cookies (e.g. remixsid, remixnsid, remixdsid)
@@ -73,6 +102,9 @@ def normalize_vk_cookies_content(content: str) -> str:
     """
     if not content:
         return content
+
+    # First sanitize existing lines to repair any flag mismatches
+    content = sanitize_netscape_content(content)
 
     target_vk_domains = [".vk.com", ".vk.ru", ".vkvideo.ru"]
     key_cookies: Dict[str, Tuple[str, str, str, str, str]] = {}
@@ -97,12 +129,13 @@ def normalize_vk_cookies_content(content: str) -> str:
     for name, (flag, path, secure, expires, value) in key_cookies.items():
         for target_domain in target_vk_domains:
             if (target_domain, name) not in existing_pairs and (target_domain.lstrip("."), name) not in existing_pairs:
-                new_lines.append(f"{target_domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
+                correct_flag = "TRUE" if target_domain.startswith(".") else "FALSE"
+                new_lines.append(f"{target_domain}\t{correct_flag}\t{path}\t{secure}\t{expires}\t{name}\t{value}")
                 existing_pairs.add((target_domain, name))
 
     if new_lines:
         delimiter = "\n" if content.endswith("\n") else "\n\n"
-        return content + delimiter + "\n".join(new_lines) + "\n"
+        content = content + delimiter + "\n".join(new_lines) + "\n"
 
     return content
 
