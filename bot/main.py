@@ -14,6 +14,7 @@ from bot.handlers.download import router as download_router
 from bot.services.queue_manager import queue_manager
 from bot.services.http_client import http_client
 from bot.services.path_wrapper import LocalFilesPathWrapper
+from bot.services.cookie_utils import ensure_cookies_file_normalized
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,6 +62,10 @@ async def main():
     # Register routers
     dp.include_router(base_router)
     dp.include_router(download_router)
+
+    # Normalize cookies if present
+    if settings.has_cookies:
+        ensure_cookies_file_normalized(settings.cookies_file)
 
     # Start background cleanup of orphaned files
     cleanup_task = asyncio.create_task(queue_manager.start_periodic_cleanup(interval_seconds=600))

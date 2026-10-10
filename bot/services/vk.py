@@ -15,6 +15,7 @@ import aiohttp
 from bot.config import settings
 from bot.services.http_client import http_client
 from bot.services.image_utils import sanitize_image
+from bot.services.cookie_utils import extract_cookies_for_domains
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +166,19 @@ class VKService:
     def __init__(self):
         self.headers = VK_HEADERS
 
+    def get_cookies(self) -> Dict[str, str]:
+        """
+        Parse cookies for VK domains from settings.cookies_file if present.
+        """
+        if not settings.has_cookies:
+            return {}
+        try:
+            content = settings.cookies_file.read_text(encoding="utf-8", errors="ignore")
+            return extract_cookies_for_domains(content, ["vk.com", "vk.ru", "vkvideo.ru"])
+        except Exception as e:
+            logger.debug(f"Failed to read VK cookies: {e}")
+            return {}
+
     def parse_vk_url_type(self, url: str) -> Tuple[str, Optional[str]]:
         """
         Identify whether a VK URL points to a video, clip, wall post, or photo.
@@ -233,9 +247,17 @@ class VKService:
             "Origin": "https://vk.com",
         }
 
+        cookies = self.get_cookies()
+
         try:
             session = await http_client.get_session()
-            async with session.post(endpoint, data=data, headers=headers, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.post(
+                endpoint,
+                data=data,
+                headers=headers,
+                cookies=cookies or None,
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
                 if resp.status != 200:
                     logger.warning(f"wkview.php returned status {resp.status} for post {post_id}")
                     return None
@@ -535,11 +557,17 @@ class VKService:
         download_dir.mkdir(parents=True, exist_ok=True)
         session = await http_client.get_session()
         task_id = str(uuid.uuid4())[:8]
+        cookies = self.get_cookies()
 
         async def _download_single(img_url: str, idx: int) -> Optional[Path]:
             out_file = download_dir / f"{task_id}_vk_{idx}.jpg"
             try:
-                async with session.get(img_url, headers=self.headers, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                async with session.get(
+                    img_url,
+                    headers=self.headers,
+                    cookies=cookies or None,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
                     if resp.status == 200:
                         async with aiofiles.open(out_file, "wb") as f:
                             await f.write(await resp.read())

@@ -169,9 +169,9 @@ If you want to send large videos (up to 2 GB), run the built-in Local Bot API se
 
 ---
 
-## 🍪 Configuring Cookies (for Instagram Stories & YouTube)
+## 🍪 Configuring Cookies (for Instagram Stories, VK & YouTube)
 
-Instagram restricts viewing Stories and certain posts without authentication. Cookies also help prevent bot verification challenges on YouTube.
+Instagram restricts viewing Stories without authentication. VK requires authentication for restricted or friends-only videos and posts. Cookies also help prevent bot verification challenges on YouTube.
 
 **The easiest method:**
 1. Install a browser extension for Chrome or Firefox (e.g., *Get cookies.txt LOCALLY* or *Cookie-Editor*).

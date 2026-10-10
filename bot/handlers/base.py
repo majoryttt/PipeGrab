@@ -9,6 +9,11 @@ from aiogram.filters import CommandStart, Command
 
 from bot.config import settings
 from bot.services.queue_manager import queue_manager
+from bot.services.cookie_utils import (
+    validate_netscape_cookies,
+    parse_cookie_services,
+    normalize_vk_cookies_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +29,12 @@ async def cmd_start(message: types.Message):
         "• 🎵 <b>TikTok</b> — видео без водяных знаков\n"
         "• 📸 <b>Instagram</b> — Reels, видео, публикации, а также <b>истории</b> (через cookies)\n"
         "• 📌 <b>Pinterest</b> — фото в оригинальном качестве, GIF, альбомы (карусели) и видео\n"
-        "• 🔵 <b>VK (ВКонтакте)</b> — видео, клипы, посты со стены, фото и карусели\n"
+        "• 🔵 <b>VK (ВКонтакте)</b> — видео, клипы, посты со стены, фото и карусели (включая приватный контент через cookies)\n"
         "• 🐦 <b>Twitter / X</b> — видео и клипы\n\n"
         "🚀 <b>Как пользоваться:</b>\n"
         "Просто отправьте мне ссылку в сообщении!\n\n"
-        "🍪 <b>Истории Instagram и Cookies:</b>\n"
-        "Истории нельзя смотреть анонимно. Используйте команду /cookies для проверки и добавления cookies."
+        "🍪 <b>Авторизация и Cookies (/cookies):</b>\n"
+        "Истории Instagram, закрытые видео/посты ВКонтакте и защита от проверок доступны при подключении cookies. Используйте команду /cookies для проверки и добавления cookies."
     )
     await message.answer(welcome_text, parse_mode="HTML")
 
@@ -43,13 +48,13 @@ async def cmd_help(message: types.Message):
         "3️⃣ <b>Pinterest:</b> бот автоматически определяет тип контента (фото, альбом, GIF-анимация или видео) и скачивает в максимальном качестве.\n"
         "4️⃣ <b>YouTube:</b> бот предложит скачать видео в MP4 или аудиодорожку в MP3.\n"
         "5️⃣ <b>Плейлисты и доски:</b> бот предложит выбрать количество элементов для загрузки.\n"
-        "6️⃣ <b>Instagram Истории:</b> отправьте команду /cookies для инструкции по добавлению файла <code>cookies.txt</code>.\n"
+        "6️⃣ <b>Авторизация и Cookies:</b> отправьте команду /cookies для инструкции по добавлению файла <code>cookies.txt</code> (для историй Instagram, закрытых видео/постов ВК и YouTube).\n"
         "7️⃣ <b>Кружки (Video Notes):</b> ответьте командой /circle на любое видео или отправьте <code>/circle &lt;ссылка&gt;</code>.\n\n"
         "<b>Команды бота:</b>\n"
         "/start — Главное меню\n"
         "/help — Справка и возможности\n"
         "/circle — Превратить видео или ссылку в Telegram-кружок\n"
-        "/cookies — Статус и настройка авторизации Instagram / YouTube\n"
+        "/cookies — Статус и настройка авторизации Instagram / ВКонтакте / YouTube\n"
         "/status — Состояние сервера и лимиты"
     )
     await message.answer(help_text, parse_mode="HTML")
@@ -65,15 +70,7 @@ async def cmd_cookies(message: types.Message):
         services = []
         try:
             content = settings.cookies_file.read_text(encoding="utf-8", errors="ignore")
-            if "instagram.com" in content:
-                has_session = "sessionid" in content
-                services.append(f"Instagram ({'авторизован ✅' if has_session else 'нет sessionid ⚠️'})")
-            if "youtube.com" in content or "google.com" in content:
-                services.append("YouTube / Google ✅")
-            if "tiktok.com" in content:
-                services.append("TikTok ✅")
-            if "pinterest.com" in content:
-                services.append("Pinterest ✅")
+            services = parse_cookie_services(content)
         except Exception:
             pass
 
@@ -95,11 +92,12 @@ async def cmd_cookies(message: types.Message):
             f"📁 Ожидается: <code>{settings.cookies_file}</code>\n\n"
             "<b>Зачем нужны cookies:</b>\n"
             "• Скачивание <b>историй Instagram</b> (Instagram блокирует анонимный доступ к историям)\n"
+            "• Доступ к <b>закрытым или ограниченным видео и записям ВКонтакте</b> (видео «только для друзей», закрытые группы)\n"
             "• Доступ к приватным или возрастным видео YouTube\n"
             "• Защита от блокировок и проверок роботов\n\n"
             "<b>Как установить cookies:</b>\n"
             "1. Установите расширение для браузера Chrome/Firefox (например, <i>Get cookies.txt LOCALLY</i> или <i>Cookie-Editor</i>).\n"
-            "2. Войдите в свой Instagram в браузере.\n"
+            "2. Войдите в свои аккаунты (Instagram, ВКонтакте, YouTube) в браузере.\n"
             "3. Экспортируйте cookies в формате <b>Netscape</b>.\n"
             "4. <b>Отправьте полученный файл <code>cookies.txt</code> прямо в этот чат Telegram как документ!</b>\n\n"
             "Бот автоматически проверит и установит файл."
@@ -182,13 +180,7 @@ async def handle_document_upload(message: types.Message):
         content = temp_path.read_text(encoding="utf-8", errors="ignore")
 
         # Validate Netscape format
-        is_netscape = (
-            "# Netscape HTTP Cookie File" in content or
-            "# HTTP Cookie File" in content or
-            any("\t" in line and len(line.split("\t")) >= 7 for line in content.splitlines() if not line.startswith("#"))
-        )
-
-        if not is_netscape:
+        if not validate_netscape_cookies(content):
             await status_msg.edit_text(
                 "❌ <b>Файл не распознан как Netscape cookies.txt.</b>\n\n"
                 "Убедитесь, что вы экспортировали cookies именно в формате <b>Netscape</b> "
@@ -197,16 +189,11 @@ async def handle_document_upload(message: types.Message):
             )
             return
 
-        services = []
-        if "instagram.com" in content:
-            has_session = "sessionid" in content
-            services.append(f"Instagram ({'найден sessionid ✅' if has_session else 'нет sessionid ⚠️'})")
-        if "youtube.com" in content or "google.com" in content:
-            services.append("YouTube / Google ✅")
-        if "tiktok.com" in content:
-            services.append("TikTok ✅")
-        if "pinterest.com" in content:
-            services.append("Pinterest ✅")
+        # Normalize VK cookies across domains (.vk.com, .vk.ru, .vkvideo.ru)
+        content = normalize_vk_cookies_content(content)
+        temp_path.write_text(content, encoding="utf-8")
+
+        services = parse_cookie_services(content)
 
         # Move to persistent cookies location
         settings.cookies_file.parent.mkdir(parents=True, exist_ok=True)
@@ -220,7 +207,7 @@ async def handle_document_upload(message: types.Message):
             f"📁 <b>Путь:</b> <code>{settings.cookies_file}</code>\n"
             f"📦 <b>Размер:</b> {file_size_kb:.1f} КБ\n"
             f"🌐 <b>Обнаруженные сервисы:</b>\n{services_str}\n\n"
-            f"🎉 Теперь бот может скачивать истории Instagram и авторизованный контент!",
+            f"🎉 Теперь бот может скачивать истории Instagram, закрытый контент ВКонтакте и другие авторизованные медиа!",
             parse_mode="HTML"
         )
     except Exception as e:
