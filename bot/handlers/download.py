@@ -155,7 +155,7 @@ async def send_media_album_robust(
     chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
     for chunk_idx, chunk in enumerate(chunks):
         files_in_chunk = list(chunk)
-        album_prefix = "🔵" if platform_name == "VK" else ("📸" if platform_name == "Instagram" else "📌")
+        album_prefix = "📸" if platform_name == "Instagram" else "📌"
         chunk_caption = (
             build_safe_caption(
                 title=title,
@@ -447,18 +447,6 @@ async def handle_text_message(message: types.Message):
                 "<i>После загрузки cookies бот сможет скачивать любые истории и закрытый контент.</i>"
             )
             return
-        elif info.error_message == "AUTH_REQUIRED_VK":
-            await update_status_safely(
-                status_msg,
-                "🔒 <b>Это видео ВКонтакте доступно только авторизованным пользователям или ограничено автором.</b>\n\n"
-                "Автор видео установил настройки приватности (просмотр только для друзей или зарегистрированных пользователей).\n\n"
-                "<b>Как решить эту проблему:</b>\n"
-                "1️⃣ Войдите в свой аккаунт ВКонтакте в браузере (на компьютере).\n"
-                "2️⃣ Экспортируйте cookies с помощью расширения (например, <i>Cookie-Editor</i> или <i>Get cookies.txt LOCALLY</i> в формате Netscape).\n"
-                "3️⃣ Отправьте полученный файл <code>cookies.txt</code> прямо в этот чат Telegram!\n\n"
-                "<i>После загрузки cookies бот сможет скачивать закрытые видео и посты, доступные вашему аккаунту.</i>"
-            )
-            return
         elif info.error_message == "AUTH_REQUIRED":
             await update_status_safely(
                 status_msg,
@@ -673,12 +661,6 @@ async def run_download_task(
                         "🔒 <b>Для скачивания историй Instagram требуется авторизация (cookies).</b>\n\n"
                         "Отправьте файл <code>cookies.txt</code> прямо в этот чат для активации доступа."
                     )
-                elif media.error_message == "AUTH_REQUIRED_VK":
-                    await update_status_safely(
-                        status_msg,
-                        "🔒 <b>Это видео ВКонтакте доступно только авторизованным пользователям или ограничено автором.</b>\n\n"
-                        "Отправьте файл <code>cookies.txt</code> с авторизацией ВКонтакте прямо в этот чат для доступа."
-                    )
                 else:
                     await update_status_safely(status_msg, "❌ <b>Требуется авторизация для доступа к этому медиа.</b>")
                 return
@@ -721,7 +703,7 @@ async def run_download_task(
 
                 try:
                     if media.media_type == MediaType.PHOTO:
-                        photo_prefix = "🔵" if platform_title == "VK" else ("📸" if platform_title == "Instagram" else "📌")
+                        photo_prefix = "📸" if platform_title == "Instagram" else "📌"
                         p_caption = build_safe_caption(
                             title=media.title,
                             url=url,

@@ -16,7 +16,6 @@ from bot.services.ffmpeg_utils import get_video_metadata, generate_thumbnail
 from bot.services.pinterest import pinterest_service, is_pinterest_url
 from bot.services.tiktok import tiktok_service, is_tiktok_url, resolve_tiktok_url
 from bot.services.instagram import instagram_service, is_instagram_url, clean_instagram_url
-from bot.services.vk import vk_service, is_vk_url, resolve_vk_url
 from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
@@ -28,7 +27,6 @@ class Platform(str, Enum):
     INSTAGRAM = "Instagram"
     TWITTER = "Twitter/X"
     PINTEREST = "Pinterest"
-    VK = "VK"
     UNKNOWN = "Unknown"
 
 
@@ -64,11 +62,6 @@ PLATFORM_PATTERNS = {
         r'(?:https?://)?(?:www\.|[a-z]{2}\.)?pinterest\.[a-z.]+/[^/\s]+/[^/\s]+',
         r'(?:https?://)?pin\.it/'
     ],
-    Platform.VK: [
-        r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?vk\.(?:com|ru)/',
-        r'(?:https?://)?(?:[a-zA-Z0-9-]+\.)?vkvideo\.ru/',
-        r'(?:https?://)?vk\.cc/',
-    ],
 }
 
 
@@ -90,8 +83,6 @@ def detect_platform(url: str) -> Platform:
                 return platform
     if is_pinterest_url(url):
         return Platform.PINTEREST
-    if is_vk_url(url):
-        return Platform.VK
     return Platform.UNKNOWN
 
 
@@ -162,13 +153,6 @@ class DownloaderService:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
         }
-        # Support VK proxy if configured
-        if platform == Platform.VK and settings.vk_proxy:
-            opts["proxy"] = settings.vk_proxy
-
-        # For VK, anonymous requests are more reliable by default because exported cookies often have expired sessions
-        if platform == Platform.VK and not use_cookies:
-            return opts
 
         if settings.has_cookies and use_cookies:
             opts["cookiefile"] = str(settings.cookies_file)
@@ -278,77 +262,7 @@ class DownloaderService:
                 error_message="AUTH_REQUIRED_INSTAGRAM_STORY"
             )
 
-        # 5. Specialized VK handler for wall posts, carousels, and photos
-        if platform == Platform.VK:
-            url = await resolve_vk_url(url)
-            vk_type, vk_id = vk_service.parse_vk_url_type(url)
-            if vk_type == "wall":
-                try:
-                    vk_data = await vk_service.extract_wall_post(url)
-                    if vk_data:
-                        if vk_data.media_type in ["photo", "album"]:
-                            media_type = MediaType.PHOTO if vk_data.media_type == "photo" else MediaType.ALBUM
-                            return MediaInfo(
-                                title=vk_data.text or "Пост ВКонтакте",
-                                duration=0,
-                                uploader=vk_data.uploader,
-                                is_playlist=False,
-                                playlist_count=0,
-                                platform=Platform.VK,
-                                url=vk_data.url,
-                                media_type=media_type
-                            )
-                        elif vk_data.media_type == "video" and vk_data.video_url:
-                            url = vk_data.video_url
-                            if settings.active_vk_token:
-                                vk_vid = await vk_service.extract_video(url)
-                                if vk_vid:
-                                    return MediaInfo(
-                                        title=vk_vid.title,
-                                        duration=vk_vid.duration,
-                                        uploader=vk_vid.uploader,
-                                        is_playlist=False,
-                                        playlist_count=0,
-                                        platform=Platform.VK,
-                                        url=vk_vid.url,
-                                        media_type=MediaType.VIDEO
-                                    )
-                except Exception as ve:
-                    logger.warning(f"VK wall post extractor failed for {url}: {ve}")
-            elif vk_type == "photo":
-                try:
-                    vk_data = await vk_service.extract_photo(url)
-                    if vk_data:
-                        return MediaInfo(
-                            title=vk_data.text or "Фото ВКонтакте",
-                            duration=0,
-                            uploader=vk_data.uploader,
-                            is_playlist=False,
-                            playlist_count=0,
-                            platform=Platform.VK,
-                            url=vk_data.url,
-                            media_type=MediaType.PHOTO
-                        )
-                except Exception as ve:
-                    logger.warning(f"VK photo extractor failed for {url}: {ve}")
-            elif vk_type in ["video", "clip"]:
-                try:
-                    vk_vid = await vk_service.extract_video(url)
-                    if vk_vid:
-                        return MediaInfo(
-                            title=vk_vid.title,
-                            duration=vk_vid.duration,
-                            uploader=vk_vid.uploader,
-                            is_playlist=False,
-                            playlist_count=0,
-                            platform=Platform.VK,
-                            url=vk_vid.url,
-                            media_type=MediaType.VIDEO
-                        )
-                except Exception as ve:
-                    logger.warning(f"VK video extractor failed for {url}: {ve}")
-
-        # 6. Generic yt-dlp extraction
+        # 5. Generic yt-dlp extraction
         def _extract(use_cookies: bool = True):
             ydl_opts = self._get_base_ydl_opts(platform=platform, use_cookies=use_cookies)
             ydl_opts["extract_flat"] = "in_playlist"
@@ -356,17 +270,7 @@ class DownloaderService:
                 return ydl.extract_info(url, download=False)
 
         try:
-            initial_use_cookies = settings.has_cookies
-            try:
-                info = await asyncio.to_thread(_extract, initial_use_cookies)
-            except Exception as first_err:
-                if platform == Platform.VK and initial_use_cookies:
-                    # Fallback to anonymous if authenticated extraction failed on VK
-                    info = await asyncio.to_thread(_extract, False)
-                elif platform == Platform.VK and not initial_use_cookies and settings.has_cookies:
-                    info = await asyncio.to_thread(_extract, True)
-                else:
-                    raise first_err
+            info = await asyncio.to_thread(_extract, settings.has_cookies)
             if not info:
                 return None
 
@@ -405,11 +309,8 @@ class DownloaderService:
                 "video only available to signed-in users",
                 "video only available to followers"
             ]):
-                if platform == Platform.VK:
-                    err_code = "AUTH_REQUIRED_VK"
-                else:
-                    is_story = platform == Platform.INSTAGRAM and "/stories/" in url
-                    err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else ("AUTH_REQUIRED_INSTAGRAM" if platform == Platform.INSTAGRAM else "AUTH_REQUIRED")
+                is_story = platform == Platform.INSTAGRAM and "/stories/" in url
+                err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else ("AUTH_REQUIRED_INSTAGRAM" if platform == Platform.INSTAGRAM else "AUTH_REQUIRED")
                 return MediaInfo(
                     title="Требуется авторизация",
                     duration=0,
@@ -565,95 +466,7 @@ class DownloaderService:
             except Exception as ie:
                 logger.warning(f"Instagram direct download failed for {url}: {ie}")
 
-        # 4. Specialized VK handler for wall posts (photos/carousels) and single photos
-        if platform == Platform.VK:
-            url = await resolve_vk_url(url)
-            vk_type, vk_id = vk_service.parse_vk_url_type(url)
-            if vk_type in ["wall", "photo"]:
-                try:
-                    vk_data = None
-                    if vk_type == "wall":
-                        vk_data = await vk_service.extract_wall_post(url)
-                    elif vk_type == "photo":
-                        vk_data = await vk_service.extract_photo(url)
-
-                    if vk_data:
-                        if vk_data.media_type in ["photo", "album"] and vk_data.image_urls:
-                            files, caption, final_type = await vk_service.download_post(
-                                vk_data,
-                                self.download_dir,
-                                progress_callback=progress_callback
-                            )
-                            if files:
-                                total_size = sum(f.stat().st_size for f in files if f.exists())
-                                return MediaInfo(
-                                    title=caption or "ВКонтакте",
-                                    duration=0,
-                                    uploader=vk_data.uploader,
-                                    is_playlist=False,
-                                    playlist_count=0,
-                                    platform=Platform.VK,
-                                    url=url,
-                                    media_type=MediaType(final_type),
-                                    file_path=files[0],
-                                    file_paths=files,
-                                    file_size=total_size
-                                )
-                        elif vk_data.media_type == "video" and vk_data.video_url:
-                            # If wall post contains video, switch to video url
-                            url = vk_data.video_url
-                            vk_vid = await vk_service.extract_video(url)
-                            if vk_vid:
-                                file_path, thumb_path, file_size = await vk_service.download_video(
-                                    vk_vid,
-                                    self.download_dir,
-                                    progress_callback=progress_callback
-                                )
-                                if file_path and file_path.exists():
-                                    return MediaInfo(
-                                        title=vk_vid.title,
-                                        duration=vk_vid.duration,
-                                        uploader=vk_vid.uploader,
-                                        is_playlist=False,
-                                        playlist_count=0,
-                                        platform=Platform.VK,
-                                        url=url,
-                                        media_type=MediaType.VIDEO,
-                                        file_path=file_path,
-                                        file_paths=[file_path],
-                                        thumbnail_path=thumb_path,
-                                        file_size=file_size
-                                    )
-                except Exception as ve:
-                    logger.warning(f"VK post direct download failed for {url}: {ve}")
-            elif vk_type in ["video", "clip"]:
-                try:
-                    vk_vid = await vk_service.extract_video(url)
-                    if vk_vid:
-                        file_path, thumb_path, file_size = await vk_service.download_video(
-                            vk_vid,
-                            self.download_dir,
-                            progress_callback=progress_callback
-                        )
-                        if file_path and file_path.exists():
-                            return MediaInfo(
-                                title=vk_vid.title,
-                                duration=vk_vid.duration,
-                                uploader=vk_vid.uploader,
-                                is_playlist=False,
-                                playlist_count=0,
-                                platform=Platform.VK,
-                                url=url,
-                                media_type=MediaType.VIDEO,
-                                file_path=file_path,
-                                file_paths=[file_path],
-                                thumbnail_path=thumb_path,
-                                file_size=file_size
-                            )
-                except Exception as ve:
-                    logger.warning(f"VK video direct download failed for {url}: {ve}")
-
-        # 5. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, VK, and Pinterest videos)
+        # 4. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, and Pinterest videos)
         task_id = str(uuid.uuid4())[:8]
         out_template = str(self.download_dir / f"{task_id}_%(title).100B.%(ext)s")
 
@@ -722,17 +535,7 @@ class DownloaderService:
                 return ydl.extract_info(url, download=True)
 
         try:
-            initial_use_cookies = settings.has_cookies
-            try:
-                info = await asyncio.to_thread(_download, initial_use_cookies)
-            except Exception as dl_err:
-                if platform == Platform.VK and initial_use_cookies:
-                    # Fallback to anonymous if authenticated download failed on VK
-                    info = await asyncio.to_thread(_download, False)
-                elif platform == Platform.VK and not initial_use_cookies and settings.has_cookies:
-                    info = await asyncio.to_thread(_download, True)
-                else:
-                    raise dl_err
+            info = await asyncio.to_thread(_download, settings.has_cookies)
             if not info:
                 return None
 
@@ -906,8 +709,6 @@ class DownloaderService:
             ]):
                 if platform == Platform.INSTAGRAM:
                     error_msg = "AUTH_REQUIRED_INSTAGRAM"
-                elif platform == Platform.VK:
-                    error_msg = "AUTH_REQUIRED_VK"
                 else:
                     error_msg = "AUTH_REQUIRED"
 
