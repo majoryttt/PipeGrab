@@ -19,3 +19,6 @@ data/*
 .coverage
 htmlcov/
 tests/
+
+# Agent configuration
+.agents/
