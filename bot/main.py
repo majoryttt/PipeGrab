@@ -7,6 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
+from aiogram.types import BotCommand, BotCommandScopeDefault
 
 from bot.config import settings
 from bot.handlers.base import router as base_router
@@ -54,6 +55,21 @@ def build_bot() -> Bot:
         return Bot(token=settings.bot_token, default=default_properties)
 
 
+async def set_bot_commands(bot: Bot):
+    commands = [
+        BotCommand(command="start", description="Главное меню"),
+        BotCommand(command="help", description="Справка и возможности"),
+        BotCommand(command="circle", description="Превратить видео в кружок"),
+        BotCommand(command="cookies", description="Статус и настройка Cookies"),
+        BotCommand(command="status", description="Состояние сервера и лимиты"),
+    ]
+    try:
+        await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+        logger.info("Bot commands registered successfully.")
+    except Exception as e:
+        logger.warning(f"Failed to set bot commands: {e}")
+
+
 async def main():
     logger.info("Starting Telegram Downloader Bot...")
     bot = build_bot()
@@ -75,6 +91,10 @@ async def main():
         await bot.delete_webhook(drop_pending_updates=True)
         me = await bot.get_me()
         logger.info(f"Bot authorized successfully as @{me.username} (ID: {me.id})")
+
+        # Set commands menu for autocomplete on '/'
+        await set_bot_commands(bot)
+
         logger.info("Ready to receive download requests!")
 
         await dp.start_polling(bot)
