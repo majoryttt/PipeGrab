@@ -41,13 +41,19 @@ async def cmd_start(message: types.Message):
 
 @router.message(Command("help"))
 async def cmd_help(message: types.Message):
+    is_admin = bool(settings.admin_id and message.from_user and message.from_user.id == settings.admin_id)
+    cookies_line = (
+        "5️⃣ <b>Авторизация и Cookies:</b> отправьте команду /cookies для инструкции по добавлению файла <code>cookies.txt</code> (для историй Instagram).\n"
+        if is_admin else
+        "5️⃣ <b>Авторизация и Cookies:</b> отправьте команду /cookies для проверки статуса авторизации Instagram / YouTube.\n"
+    )
     help_text = (
         "📖 <b>Справка по использованию:</b>\n\n"
         "1️⃣ <b>Отправка ссылки:</b> скопируйте ссылку из приложения или браузера и отправьте боту.\n"
         "2️⃣ <b>Pinterest:</b> бот автоматически определяет тип контента (фото, альбом, GIF-анимация или видео) и скачивает в максимальном качестве.\n"
         "3️⃣ <b>YouTube:</b> бот предложит скачать видео в MP4 или аудиодорожку в MP3.\n"
         "4️⃣ <b>Плейлисты и доски:</b> бот предложит выбрать количество элементов для загрузки.\n"
-        "5️⃣ <b>Авторизация и Cookies:</b> отправьте команду /cookies для инструкции по добавлению файла <code>cookies.txt</code> (для историй Instagram).\n"
+        f"{cookies_line}"
         "6️⃣ <b>Кружки (Video Notes):</b> ответьте командой /circle на любое видео или отправьте <code>/circle &lt;ссылка&gt;</code>.\n\n"
         "<b>Команды бота:</b>\n"
         "/start — Главное меню\n"
@@ -61,6 +67,8 @@ async def cmd_help(message: types.Message):
 
 @router.message(Command("cookies"))
 async def cmd_cookies(message: types.Message):
+    is_admin = bool(settings.admin_id and message.from_user and message.from_user.id == settings.admin_id)
+
     if settings.has_cookies:
         stat = settings.cookies_file.stat()
         file_size_kb = stat.st_size / 1024
@@ -75,31 +83,44 @@ async def cmd_cookies(message: types.Message):
 
         services_str = "\n".join(f"• {s}" for s in services) if services else "• Общие cookies"
 
+        update_hint = (
+            "\n\n<i>Чтобы обновить куки, просто отправьте новый файл <code>cookies.txt</code> в этот чат.</i>"
+            if is_admin else ""
+        )
+
         text = (
             "🍪 <b>Статус Cookies:</b>\n\n"
             "✅ <b>Файл cookies подключен и активен!</b>\n"
             f"📁 <b>Путь:</b> <code>{settings.cookies_file}</code>\n"
             f"📦 <b>Размер:</b> {file_size_kb:.1f} КБ\n"
             f"📅 <b>Обновлен:</b> {mtime}\n\n"
-            f"🌐 <b>Найденные авторизации:</b>\n{services_str}\n\n"
-            "<i>Чтобы обновить куки, просто отправьте новый файл <code>cookies.txt</code> в этот чат.</i>"
+            f"🌐 <b>Найденные авторизации:</b>\n{services_str}"
+            f"{update_hint}"
         )
     else:
-        text = (
-            "🍪 <b>Статус Cookies:</b>\n\n"
-            "⚠️ <b>Файл cookies не найден или пуст.</b>\n"
-            f"📁 Ожидается: <code>{settings.cookies_file}</code>\n\n"
-            "<b>Зачем нужны cookies:</b>\n"
-            "• Скачивание <b>историй Instagram</b> (Instagram блокирует анонимный доступ к историям)\n"
-            "• Доступ к приватным или возрастным видео YouTube\n"
-            "• Защита от блокировок и проверок роботов\n\n"
-            "<b>Как установить cookies:</b>\n"
-            "1. Установите расширение для браузера Chrome/Firefox (например, <i>Get cookies.txt LOCALLY</i> или <i>Cookie-Editor</i>).\n"
-            "2. Войдите в свои аккаунты (Instagram, YouTube) в браузере.\n"
-            "3. Экспортируйте cookies в формате <b>Netscape</b>.\n"
-            "4. <b>Отправьте полученный файл <code>cookies.txt</code> прямо в этот чат Telegram как документ!</b>\n\n"
-            "Бот автоматически проверит и установит файл."
-        )
+        if is_admin:
+            text = (
+                "🍪 <b>Статус Cookies:</b>\n\n"
+                "⚠️ <b>Файл cookies не найден или пуст.</b>\n"
+                f"📁 Ожидается: <code>{settings.cookies_file}</code>\n\n"
+                "<b>Зачем нужны cookies:</b>\n"
+                "• Скачивание <b>историй Instagram</b> (Instagram блокирует анонимный доступ к историям)\n"
+                "• Доступ к приватным или возрастным видео YouTube\n"
+                "• Защита от блокировок и проверок роботов\n\n"
+                "<b>Как установить cookies:</b>\n"
+                "1. Установите расширение для браузера Chrome/Firefox (например, <i>Get cookies.txt LOCALLY</i> или <i>Cookie-Editor</i>).\n"
+                "2. Войдите в свои аккаунты (Instagram, YouTube) в браузере.\n"
+                "3. Экспортируйте cookies в формате <b>Netscape</b>.\n"
+                "4. <b>Отправьте полученный файл <code>cookies.txt</code> прямо в этот чат Telegram как документ!</b>\n\n"
+                "Бот автоматически проверит и установит файл."
+            )
+        else:
+            text = (
+                "🍪 <b>Статус Cookies:</b>\n\n"
+                "⚠️ <b>Файл cookies не подключен.</b>\n\n"
+                "Для скачивания историй Instagram и обхода ограничений требуются cookies.\n"
+                "Настройка и загрузка cookies доступны только администратору бота."
+            )
     await message.answer(text, parse_mode="HTML")
 
 
@@ -158,10 +179,11 @@ async def handle_document_upload(message: types.Message):
     if not (filename == "cookies.txt" or ("cookie" in filename and filename.endswith(".txt"))):
         return
 
-    # Check admin privileges if configured
-    if settings.admin_id and message.from_user.id != settings.admin_id:
+    # Check admin privileges: only ADMIN_ID can upload/modify cookies
+    user_id = message.from_user.id if message.from_user else None
+    if not settings.admin_id or user_id != settings.admin_id:
         await message.reply(
-            "⛔️ <b>Доступ ограничен.</b> Только администратор бота может загружать cookies.",
+            "⛔️ <b>Доступ ограничен.</b> Только администратор бота может загружать и изменять cookies.",
             parse_mode="HTML"
         )
         return

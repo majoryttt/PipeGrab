@@ -435,25 +435,41 @@ async def handle_text_message(message: types.Message):
 
     # Check for authentication or privacy errors
     if info and info.error_message:
+        user_id = message.from_user.id if message.from_user else 0
+        is_admin = bool(settings.admin_id and user_id == settings.admin_id)
         if info.error_message in ["AUTH_REQUIRED_INSTAGRAM_STORY", "AUTH_REQUIRED_INSTAGRAM"]:
-            await update_status_safely(
-                status_msg,
-                "🔒 <b>Для скачивания историй Instagram требуется авторизация (cookies).</b>\n\n"
-                "Instagram не позволяет просматривать истории анонимно.\n\n"
-                "<b>Как решить эту проблему:</b>\n"
-                "1️⃣ Войдите в Instagram в браузере (на компьютере).\n"
-                "2️⃣ Экспортируйте cookies с помощью расширения (например, <i>Get cookies.txt LOCALLY</i> или <i>Cookie-Editor</i> в формате Netscape).\n"
-                "3️⃣ Отправьте полученный файл <code>cookies.txt</code> прямо в этот чат Telegram!\n\n"
-                "<i>После загрузки cookies бот сможет скачивать любые истории и закрытый контент.</i>"
-            )
+            if is_admin:
+                story_msg = (
+                    "🔒 <b>Для скачивания историй Instagram требуется авторизация (cookies).</b>\n\n"
+                    "Instagram не позволяет просматривать истории анонимно.\n\n"
+                    "<b>Как решить эту проблему:</b>\n"
+                    "1️⃣ Войдите в Instagram в браузере (на компьютере).\n"
+                    "2️⃣ Экспортируйте cookies с помощью расширения (например, <i>Get cookies.txt LOCALLY</i> или <i>Cookie-Editor</i> в формате Netscape).\n"
+                    "3️⃣ Отправьте полученный файл <code>cookies.txt</code> прямо в этот чат Telegram!\n\n"
+                    "<i>После загрузки cookies бот сможет скачивать любые истории и закрытый контент.</i>"
+                )
+            else:
+                story_msg = (
+                    "🔒 <b>Для скачивания историй Instagram требуется авторизация (cookies).</b>\n\n"
+                    "Instagram не позволяет просматривать истории анонимно.\n"
+                    "Для включения доступа администратор бота должен загрузить файл cookies."
+                )
+            await update_status_safely(status_msg, story_msg)
             return
         elif info.error_message == "AUTH_REQUIRED":
-            await update_status_safely(
-                status_msg,
-                "🔒 <b>Для этого контента требуется авторизация.</b>\n\n"
-                "Сервис запросил вход в аккаунт или проверку безопасности.\n"
-                "Вы можете загрузить файл <code>cookies.txt</code> в бот для авторизации."
-            )
+            if is_admin:
+                auth_msg = (
+                    "🔒 <b>Для этого контента требуется авторизация.</b>\n\n"
+                    "Сервис запросил вход в аккаунт или проверку безопасности.\n"
+                    "Вы можете загрузить файл <code>cookies.txt</code> в бот для авторизации."
+                )
+            else:
+                auth_msg = (
+                    "🔒 <b>Для этого контента требуется авторизация.</b>\n\n"
+                    "Сервис запросил вход в аккаунт или проверку безопасности.\n"
+                    "Для доступа требуются cookies, которые может загрузить только администратор бота."
+                )
+            await update_status_safely(status_msg, auth_msg)
             return
         elif info.error_message == "PRIVATE_CONTENT":
             await update_status_safely(
@@ -656,11 +672,18 @@ async def run_download_task(
             # Check if error message returned
             if media and media.error_message:
                 if media.error_message in ["AUTH_REQUIRED_INSTAGRAM_STORY", "AUTH_REQUIRED_INSTAGRAM"]:
-                    await update_status_safely(
-                        status_msg,
-                        "🔒 <b>Для скачивания историй Instagram требуется авторизация (cookies).</b>\n\n"
-                        "Отправьте файл <code>cookies.txt</code> прямо в этот чат для активации доступа."
-                    )
+                    is_admin = bool(settings.admin_id and user_id == settings.admin_id)
+                    if is_admin:
+                        auth_err_msg = (
+                            "🔒 <b>Для скачивания историй Instagram требуется авторизация (cookies).</b>\n\n"
+                            "Отправьте файл <code>cookies.txt</code> прямо в этот чат для активации доступа."
+                        )
+                    else:
+                        auth_err_msg = (
+                            "🔒 <b>Для скачивания историй Instagram требуется авторизация (cookies).</b>\n\n"
+                            "Для доступа к историям администратор бота должен загрузить файл cookies."
+                        )
+                    await update_status_safely(status_msg, auth_err_msg)
                 else:
                     await update_status_safely(status_msg, "❌ <b>Требуется авторизация для доступа к этому медиа.</b>")
                 return
