@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     max_concurrent_downloads: int = 3
     cookies_file: Path = Path("data/cookies/cookies.txt")
     downloads_dir: Path = Path("downloads")
+    stats_db_path: Path = Path("data/stats.db")
     delete_source_message: bool = True
 
     @property
@@ -34,4 +35,5 @@ class Settings(BaseSettings):
 settings = Settings()
 settings.downloads_dir.mkdir(parents=True, exist_ok=True)
 settings.cookies_file.parent.mkdir(parents=True, exist_ok=True)
+settings.stats_db_path.parent.mkdir(parents=True, exist_ok=True)
 

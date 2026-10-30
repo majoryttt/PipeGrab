@@ -5,14 +5,17 @@ from pathlib import Path
 
 import aiofiles
 from aiogram import Bot, F, Router, types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 
 from bot.config import settings
+from bot.keyboards.inline import get_stats_keyboard
 from bot.services.cookie_utils import (
     parse_cookie_services,
     validate_netscape_cookies,
 )
 from bot.services.queue_manager import queue_manager
+from bot.services.stats_service import stats_service
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,7 @@ async def cmd_help(message: types.Message):
         "/circle — Превратить видео или ссылку в Telegram-кружок\n"
         "/cookies — Статус и настройка авторизации Instagram / YouTube\n"
         "/status — Состояние сервера и лимиты"
+        + ("\n/stats — Статистика загрузок и аналитика" if is_admin else "")
     )
     await message.answer(help_text, parse_mode="HTML")
 
@@ -237,7 +241,7 @@ async def handle_document_upload(message: types.Message):
 
 @router.message(Command("status"))
 async def cmd_status(message: types.Message):
-    total, used, free = shutil.disk_usage(settings.downloads_dir)
+    total, _used, free = shutil.disk_usage(settings.downloads_dir)
     api_mode = "Локальный (до 2 ГБ)" if settings.local_bot_api_url else "Стандартный Bot API (до 50 МБ)"
 
     if settings.has_cookies:
@@ -254,3 +258,54 @@ async def cmd_status(message: types.Message):
         f"• <b>Лимит размера файла:</b> {settings.max_file_size_mb} МБ\n"
     )
     await message.answer(status_text, parse_mode="HTML")
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    user_id = message.from_user.id if message.from_user else 0
+    if not settings.admin_id or user_id != settings.admin_id:
+        await message.answer("⛔ У вас нет доступа к этой команде.")
+        return
+
+    summary = await stats_service.get_stats("day")
+    text = stats_service.format_stats_message(summary)
+    kb = get_stats_keyboard("day")
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("stats:"))
+async def handle_stats_callback(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if not settings.admin_id or user_id != settings.admin_id:
+        await callback.answer("⛔ У вас нет доступа к этой команде.", show_alert=True)
+        return
+
+    data = callback.data or ""
+    parts = data.split(":")
+    if len(parts) == 2:
+        period = parts[1]
+    elif len(parts) == 3 and parts[1] == "refresh":
+        period = parts[2]
+    else:
+        period = "day"
+
+    if period not in ("day", "week", "month", "all"):
+        period = "day"
+
+    summary = await stats_service.get_stats(period)
+    text = stats_service.format_stats_message(summary)
+    kb = get_stats_keyboard(period)
+
+    if isinstance(callback.message, types.Message):
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await callback.answer("Данные обновлены 🔄" if "refresh" in data else None)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                await callback.answer("Статистика актуальна ✅")
+            else:
+                logger.warning(f"Failed to edit stats message: {e}")
+                await callback.answer()
+    else:
+        await callback.answer()
+

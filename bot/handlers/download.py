@@ -46,6 +46,7 @@ from bot.services.downloader import (
 )
 from bot.services.ffmpeg_utils import convert_to_video_note
 from bot.services.queue_manager import queue_manager
+from bot.services.stats_service import stats_service
 
 logger = logging.getLogger(__name__)
 
@@ -726,6 +727,14 @@ async def run_download_task(
 
             # Check if error message returned
             if media and media.error_message:
+                p_val = media.platform.value if hasattr(media.platform, "value") else str(media.platform)
+                await stats_service.record_download(
+                    user_id=user_id,
+                    platform=p_val,
+                    media_type="unknown",
+                    file_size=0,
+                    status="error"
+                )
                 if media.error_message in ["AUTH_REQUIRED_INSTAGRAM_STORY", "AUTH_REQUIRED_INSTAGRAM"]:
                     is_admin = bool(settings.admin_id and user_id == settings.admin_id)
                     if is_admin:
@@ -749,6 +758,14 @@ async def run_download_task(
             )
 
             if not media or not has_files:
+                p_val = detect_platform(url).value
+                await stats_service.record_download(
+                    user_id=user_id,
+                    platform=p_val,
+                    media_type="unknown",
+                    file_size=0,
+                    status="error"
+                )
                 await update_status_safely(
                     status_msg,
                     "❌ <b>Ошибка при загрузке медиафайла.</b>\n"
@@ -910,6 +927,17 @@ async def run_download_task(
                     except Exception as a_err:
                         logger.warning(f"Failed to send accompanying audio: {a_err}")
 
+                # Record successful download in stats
+                p_val = media.platform.value if hasattr(media.platform, "value") else str(media.platform)
+                m_val = media.media_type.value if hasattr(media.media_type, "value") else str(media.media_type)
+                await stats_service.record_download(
+                    user_id=user_id,
+                    platform=p_val,
+                    media_type=m_val,
+                    file_size=media.file_size or 0,
+                    status="success"
+                )
+
                 # Clean up status message and source link in background without blocking queue
                 to_delete = [status_msg.message_id]
                 if settings.delete_source_message and original_message_id:
@@ -917,6 +945,14 @@ async def run_download_task(
                 cleanup_messages_in_background(bot, chat_id, to_delete)
             except Exception as send_err:
                 logger.error(f"Error sending media to chat {chat_id}: {send_err}")
+                p_val = media.platform.value if (media and hasattr(media.platform, "value")) else str(detect_platform(url).value)
+                await stats_service.record_download(
+                    user_id=user_id,
+                    platform=p_val,
+                    media_type="unknown",
+                    file_size=0,
+                    status="error"
+                )
                 esc_err = html.escape(str(send_err))
                 await update_status_safely(status_msg, f"❌ <b>Ошибка при отправке в Telegram:</b> {esc_err}")
 
@@ -927,6 +963,13 @@ async def run_download_task(
         )
     except Exception as e:
         logger.error(f"Unexpected error in download task: {e}")
+        await stats_service.record_download(
+            user_id=user_id,
+            platform=str(detect_platform(url).value),
+            media_type="unknown",
+            file_size=0,
+            status="error"
+        )
         await update_status_safely(status_msg, f"❌ Произошла непредвиденная ошибка: {e}")
     finally:
         if action_task:
@@ -1031,6 +1074,24 @@ async def run_playlist_task(
                             await bot.send_video(chat_id=chat_id, video=FSInputFile(str(media.file_path)), thumbnail=thumb_file, caption=plain_cap, supports_streaming=True)
                     except Exception as e:
                         logger.error(f"Failed to send item {index}: {e}")
+                        p_val = media.platform.value if hasattr(media.platform, "value") else str(media.platform)
+                        await stats_service.record_download(
+                            user_id=user_id,
+                            platform=p_val,
+                            media_type="unknown",
+                            file_size=0,
+                            status="error"
+                        )
+                    else:
+                        p_val = media.platform.value if hasattr(media.platform, "value") else str(media.platform)
+                        m_val = media.media_type.value if hasattr(media.media_type, "value") else str(media.media_type)
+                        await stats_service.record_download(
+                            user_id=user_id,
+                            platform=p_val,
+                            media_type=m_val,
+                            file_size=media.file_size or 0,
+                            status="success"
+                        )
                     finally:
                         if media.file_path and media.file_path.exists():
                             media.file_path.unlink(missing_ok=True)

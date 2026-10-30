@@ -7,7 +7,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
-from aiogram.types import BotCommand, BotCommandScopeDefault
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
 from bot.config import settings
 from bot.handlers.base import router as base_router
@@ -65,6 +65,11 @@ async def set_bot_commands(bot: Bot):
     ]
     try:
         await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
+        if settings.admin_id:
+            admin_commands = commands + [
+                BotCommand(command="stats", description="Панель статистики и аналитики")
+            ]
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=settings.admin_id))
         logger.info("Bot commands registered successfully.")
     except Exception as e:
         logger.warning(f"Failed to set bot commands: {e}")

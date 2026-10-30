@@ -86,3 +86,28 @@ def get_playlist_kb(url: str, total_count: int, original_message_id: int | None 
     ])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_stats_keyboard(active_period: str = "day") -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for switching stats periods (day, week, month, all) and refreshing.
+    """
+    periods = [
+        ("day", "📅 День"),
+        ("week", "📆 Неделя"),
+        ("month", "🗓 Месяц"),
+        ("all", "♾ Всё время"),
+    ]
+    row1: list[InlineKeyboardButton] = []
+    row2: list[InlineKeyboardButton] = []
+    for i, (p_code, p_label) in enumerate(periods):
+        label = f"• {p_label} •" if p_code == active_period else p_label
+        btn = InlineKeyboardButton(text=label, callback_data=f"stats:{p_code}")
+        if i < 2:
+            row1.append(btn)
+        else:
+            row2.append(btn)
+
+    refresh_btn = InlineKeyboardButton(text="🔄 Обновить", callback_data=f"stats:refresh:{active_period}")
+    return InlineKeyboardMarkup(inline_keyboard=[row1, row2, [refresh_btn]])
+
