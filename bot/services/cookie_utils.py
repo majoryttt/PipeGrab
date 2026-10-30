@@ -87,28 +87,6 @@ def sanitize_netscape_content(content: str) -> str:
     return "\n".join(cleaned) + ("\n" if content.endswith("\n") else "")
 
 
-def extract_cookies_for_domains(content: str, target_domains: list[str]) -> dict[str, str]:
-    """
-    Extract a dictionary of {cookie_name: cookie_value} for given domain suffixes.
-    """
-    cookies: dict[str, str] = {}
-    if not content:
-        return cookies
-
-    for line in content.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        parts = stripped.split("\t")
-        if len(parts) >= 7:
-            domain, _, _, _, _, name, value = parts[:7]
-            domain_clean = domain.lower()
-            if any(target in domain_clean for target in target_domains):
-                cookies[name] = value
-
-    return cookies
-
-
 def ensure_cookies_file_normalized(cookies_file: Path) -> bool:
     """
     Read cookies_file, apply Netscape format sanitization if needed, and write back.

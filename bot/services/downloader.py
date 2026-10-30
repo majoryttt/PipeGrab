@@ -122,19 +122,6 @@ class MediaInfo:
 class DownloaderService:
     def __init__(self):
         self.download_dir = settings.downloads_dir
-        self._cache: dict[str, tuple[float, MediaInfo]] = {}
-
-    def get_cached_info(self, url: str) -> MediaInfo | None:
-        if url in self._cache:
-            ts, info = self._cache[url]
-            if time.time() - ts < 300:  # 5 minutes TTL
-                return info
-            del self._cache[url]
-        return None
-
-    def set_cached_info(self, url: str, info: MediaInfo):
-        if not info.error_message:
-            self._cache[url] = (time.time(), info)
 
     async def _build_media_info(
         self,
@@ -201,10 +188,6 @@ class DownloaderService:
         """
         Extract metadata without downloading media.
         """
-        cached = self.get_cached_info(url)
-        if cached:
-            return cached
-
         platform = detect_platform(url)
         if platform == Platform.INSTAGRAM:
             url = clean_instagram_url(url)

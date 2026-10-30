@@ -18,7 +18,6 @@ data/*
 .pytest_cache/
 .coverage
 htmlcov/
-tests/
 
 # Agent configuration
 .agents/

@@ -2,7 +2,6 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import aiofiles
 import aiohttp
@@ -108,45 +107,6 @@ class HTTPClient:
             path for (url, path), res in zip(tasks, results)
             if res is True and path.exists() and path.stat().st_size > 0
         ]
-
-    async def get_json(
-        self,
-        url: str,
-        headers: dict[str, str] | None = None,
-        timeout_seconds: int | None = None,
-    ) -> dict[str, Any] | None:
-        """Fetch and parse JSON from a given URL."""
-        session = await self.get_session()
-        req_headers = {**DEFAULT_HEADERS, **(headers or {})}
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds) if timeout_seconds else None
-        try:
-            async with session.get(url, headers=req_headers, timeout=timeout) as resp:
-                if resp.status == 200:
-                    return await resp.json(content_type=None)
-                logger.warning(f"HTTP GET {url} failed with status {resp.status}")
-                return None
-        except Exception as e:
-            logger.warning(f"Error fetching JSON from {url}: {e}")
-            return None
-
-    async def get_text(
-        self,
-        url: str,
-        headers: dict[str, str] | None = None,
-        timeout_seconds: int | None = None,
-    ) -> str | None:
-        """Fetch raw text/HTML from a given URL."""
-        session = await self.get_session()
-        req_headers = {**DEFAULT_HEADERS, **(headers or {})}
-        timeout = aiohttp.ClientTimeout(total=timeout_seconds) if timeout_seconds else None
-        try:
-            async with session.get(url, headers=req_headers, timeout=timeout) as resp:
-                if resp.status == 200:
-                    return await resp.text()
-                return None
-        except Exception as e:
-            logger.warning(f"Error fetching text from {url}: {e}")
-            return None
 
     async def close(self):
         """Close the shared ClientSession."""
