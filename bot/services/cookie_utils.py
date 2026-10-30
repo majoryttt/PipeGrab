@@ -4,7 +4,6 @@ Supports parsing, validating, detecting services, and Netscape cookie sanitizati
 """
 import logging
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +30,11 @@ def validate_netscape_cookies(content: str) -> bool:
     return False
 
 
-def parse_cookie_services(content: str) -> List[str]:
+def parse_cookie_services(content: str) -> list[str]:
     """
     Detect configured services and authentication status in cookie content.
     """
-    services: List[str] = []
+    services: list[str] = []
     if not content:
         return services
 
@@ -88,11 +87,11 @@ def sanitize_netscape_content(content: str) -> str:
     return "\n".join(cleaned) + ("\n" if content.endswith("\n") else "")
 
 
-def extract_cookies_for_domains(content: str, target_domains: List[str]) -> Dict[str, str]:
+def extract_cookies_for_domains(content: str, target_domains: list[str]) -> dict[str, str]:
     """
     Extract a dictionary of {cookie_name: cookie_value} for given domain suffixes.
     """
-    cookies: Dict[str, str] = {}
+    cookies: dict[str, str] = {}
     if not content:
         return cookies
 

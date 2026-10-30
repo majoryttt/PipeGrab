@@ -2,7 +2,6 @@ import asyncio
 import logging
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ def is_valid_image_file(path: Path) -> bool:
         return False
 
 
-def _run_sanitize(path: Path) -> Optional[Path]:
+def _run_sanitize(path: Path) -> Path | None:
     """
     Synchronous image sanitizer and repair function:
     - Verifies image integrity with ffprobe.
@@ -98,7 +97,7 @@ def _run_sanitize(path: Path) -> Optional[Path]:
         return path if path.exists() and path.stat().st_size > 0 else None
 
 
-async def sanitize_image(path: Path) -> Optional[Path]:
+async def sanitize_image(path: Path) -> Path | None:
     """Async wrapper for image sanitization and repair."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _run_sanitize, path)

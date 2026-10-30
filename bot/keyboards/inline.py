@@ -1,10 +1,10 @@
 import uuid
-from typing import Dict
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # In-memory storage mapping short cache IDs to URL and original message info
 # Keeps callback_data under Telegram's 64-byte limit
-_URL_CACHE: Dict[str, dict] = {}
+_URL_CACHE: dict[str, dict] = {}
 _MAX_CACHE_SIZE = 2000
 
 

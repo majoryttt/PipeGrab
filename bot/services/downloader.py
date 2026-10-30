@@ -1,22 +1,25 @@
 import asyncio
 import logging
-import os
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Optional, List, Dict, Any, Tuple
+from typing import Any
 
-import yt_dlp
+import yt_dlp  # type: ignore[import-untyped]
 
 from bot.config import settings
-from bot.services.ffmpeg_utils import get_video_metadata, generate_thumbnail
-from bot.services.pinterest import pinterest_service, is_pinterest_url
-from bot.services.tiktok import tiktok_service, is_tiktok_url, resolve_tiktok_url
-from bot.services.instagram import instagram_service, is_instagram_url, clean_instagram_url
+from bot.services.ffmpeg_utils import generate_thumbnail, get_video_metadata
 from bot.services.http_client import http_client
+from bot.services.instagram import (
+    clean_instagram_url,
+    instagram_service,
+)
+from bot.services.pinterest import is_pinterest_url, pinterest_service
+from bot.services.tiktok import resolve_tiktok_url, tiktok_service
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +68,7 @@ PLATFORM_PATTERNS = {
 }
 
 
-def extract_first_url(text: str) -> Optional[str]:
+def extract_first_url(text: str) -> str | None:
     """Extract the first HTTP/HTTPS URL from a text message."""
     match = URL_REGEX.search(text)
     if match:
@@ -106,22 +109,22 @@ class MediaInfo:
     platform: Platform
     url: str
     media_type: MediaType = MediaType.VIDEO
-    file_path: Optional[Path] = None
-    file_paths: List[Path] = field(default_factory=list)
-    thumbnail_path: Optional[Path] = None
+    file_path: Path | None = None
+    file_paths: list[Path] = field(default_factory=list)
+    thumbnail_path: Path | None = None
     width: int = 0
     height: int = 0
     file_size: int = 0
-    error_message: Optional[str] = None
-    audio_path: Optional[Path] = None
+    error_message: str | None = None
+    audio_path: Path | None = None
 
 
 class DownloaderService:
     def __init__(self):
         self.download_dir = settings.downloads_dir
-        self._cache: Dict[str, Tuple[float, MediaInfo]] = {}
+        self._cache: dict[str, tuple[float, MediaInfo]] = {}
 
-    def get_cached_info(self, url: str) -> Optional[MediaInfo]:
+    def get_cached_info(self, url: str) -> MediaInfo | None:
         if url in self._cache:
             ts, info = self._cache[url]
             if time.time() - ts < 300:  # 5 minutes TTL
@@ -133,11 +136,10 @@ class DownloaderService:
         if not info.error_message:
             self._cache[url] = (time.time(), info)
 
-    def _get_base_ydl_opts(self, platform: Optional[Platform] = None, use_cookies: bool = True) -> Dict[str, Any]:
-        opts: Dict[str, Any] = {
+    def _get_base_ydl_opts(self, platform: Platform | None = None, use_cookies: bool = True) -> dict[str, Any]:
+        opts: dict[str, Any] = {
             "quiet": True,
             "no_warnings": True,
-            "nocheckcertificate": True,
             "ignoreerrors": False,
             "ignore_no_formats_error": True,
             "logtostderr": False,
@@ -158,7 +160,7 @@ class DownloaderService:
             opts["cookiefile"] = str(settings.cookies_file)
         return opts
 
-    async def get_info(self, url: str) -> Optional[MediaInfo]:
+    async def get_info(self, url: str) -> MediaInfo | None:
         """
         Extract metadata without downloading media.
         """
@@ -339,8 +341,8 @@ class DownloaderService:
         self,
         url: str,
         audio_only: bool = False,
-        progress_callback: Optional[Callable[[DownloadProgress], Any]] = None
-    ) -> Optional[MediaInfo]:
+        progress_callback: Callable[[DownloadProgress], Any] | None = None
+    ) -> MediaInfo | None:
         """
         Download media (video, audio, photo, gif, album) and return MediaInfo with file path(s).
         """
@@ -551,10 +553,7 @@ class DownloaderService:
 
             file_path = files[0]
             for f in files:
-                if audio_only and f.suffix.lower() == ".mp3":
-                    file_path = f
-                    break
-                elif not audio_only and f.suffix.lower() == ".mp4":
+                if audio_only and f.suffix.lower() == ".mp3" or not audio_only and f.suffix.lower() == ".mp4":
                     file_path = f
                     break
 
@@ -723,7 +722,7 @@ class DownloaderService:
                 error_message=error_msg
             ) if error_msg else None
 
-    async def get_playlist_items(self, url: str, max_items: int = 20) -> List[Dict[str, Any]]:
+    async def get_playlist_items(self, url: str, max_items: int = 20) -> list[dict[str, Any]]:
         """
         Extract entries from a playlist up to max_items.
         """

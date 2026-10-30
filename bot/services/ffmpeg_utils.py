@@ -2,12 +2,12 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-async def get_video_metadata(video_path: Path) -> Dict[str, Any]:
+async def get_video_metadata(video_path: Path) -> dict[str, Any]:
     """
     Extract width, height, duration using ffprobe.
     Returns a dict with 'width', 'height', 'duration'.
@@ -61,7 +61,7 @@ async def get_video_metadata(video_path: Path) -> Dict[str, Any]:
     return metadata
 
 
-async def generate_thumbnail(video_path: Path, thumb_path: Path, timestamp: float = 1.0) -> Optional[Path]:
+async def generate_thumbnail(video_path: Path, thumb_path: Path, timestamp: float = 1.0) -> Path | None:
     """
     Generate a JPEG thumbnail from a video at the specified timestamp.
     Scaled down to a max width of 320 for Telegram preview specifications.
@@ -105,7 +105,7 @@ async def convert_to_video_note(
     output_path: Path,
     max_duration: int = 60,
     size: int = 640
-) -> Optional[Path]:
+) -> Path | None:
     """
     Convert a video to a Telegram Video Note (circle note):
     - 1:1 aspect ratio square via center crop

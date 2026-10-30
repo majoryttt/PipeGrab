@@ -12,10 +12,10 @@ from aiogram.types import BotCommand, BotCommandScopeDefault
 from bot.config import settings
 from bot.handlers.base import router as base_router
 from bot.handlers.download import router as download_router
-from bot.services.queue_manager import queue_manager
+from bot.services.cookie_utils import ensure_cookies_file_normalized
 from bot.services.http_client import http_client
 from bot.services.path_wrapper import LocalFilesPathWrapper
-from bot.services.cookie_utils import ensure_cookies_file_normalized
+from bot.services.queue_manager import queue_manager
 
 logging.basicConfig(
     level=logging.INFO,

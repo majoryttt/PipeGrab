@@ -7,4 +7,8 @@ gallery-dl>=1.27.0
 curl-cffi>=0.7.0
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
+ruff>=0.17.0
+mypy>=2.4.0
+vulture>=2.16
+types-aiofiles>=25.1.0
 

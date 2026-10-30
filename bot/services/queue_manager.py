@@ -2,8 +2,6 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
-from typing import Set
 
 from bot.config import settings
 
@@ -13,7 +11,7 @@ logger = logging.getLogger(__name__)
 class QueueManager:
     def __init__(self):
         self._semaphore = asyncio.Semaphore(settings.max_concurrent_downloads)
-        self._active_users: Set[int] = set()
+        self._active_users: set[int] = set()
         self._lock = asyncio.Lock()
 
     async def can_user_download(self, user_id: int) -> bool:

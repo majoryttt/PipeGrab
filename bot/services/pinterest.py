@@ -1,21 +1,18 @@
 import asyncio
 import json
 import logging
-import os
 import re
 import subprocess
-import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
 import aiofiles
 import aiohttp
 
-from bot.config import settings
 from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
@@ -61,7 +58,7 @@ def normalize_to_original_image_url(url: str) -> str:
     return re.sub(r'/(?:236x|474x|564x|736x)/', '/originals/', url)
 
 
-def extract_image_signature(url: str) -> Optional[str]:
+def extract_image_signature(url: str) -> str | None:
     """Extract the hex hash identifying the image file."""
     match = re.search(r'/([a-f0-9]{32})\.', url)
     if match:
@@ -80,18 +77,18 @@ class PinterestData:
     title: str
     uploader: str
     media_type: str  # 'photo', 'album', 'animation', 'video', 'board'
-    image_urls: List[str] = field(default_factory=list)
-    video_url: Optional[str] = None
+    image_urls: list[str] = field(default_factory=list)
+    video_url: str | None = None
     duration: int = 0
     is_board: bool = False
-    board_pin_urls: List[str] = field(default_factory=list)
+    board_pin_urls: list[str] = field(default_factory=list)
 
 
 class PinterestService:
     def __init__(self):
         self.headers = PINTEREST_HEADERS
 
-    def _extract_with_gallery_dl(self, target_url: str) -> Optional[PinterestData]:
+    def _extract_with_gallery_dl(self, target_url: str) -> PinterestData | None:
         """
         Extract Pinterest pin or board metadata using gallery-dl.
         Returns PinterestData if successful, None otherwise.
@@ -110,9 +107,9 @@ class PinterestService:
             pin_id = ""
             title = "Pinterest Media"
             uploader = "Pinterest"
-            image_urls: List[str] = []
+            image_urls: list[str] = []
             video_url = None
-            board_pin_urls: List[str] = []
+            board_pin_urls: list[str] = []
 
             # Check if this was a board or multi-pin feed
             directories = [
@@ -168,7 +165,7 @@ class PinterestService:
                     fmeta = item[2] if len(item) > 2 and isinstance(item[2], dict) else {}
                     if isinstance(furl, str):
                         if furl.startswith("ytdl:") or furl.endswith(".mp4") or fmeta.get("extension") == "mp4":
-                            actual_v_url = furl[5:] if furl.startswith("ytdl:") else furl
+                            actual_v_url = furl.removeprefix("ytdl:")
                             video_url = actual_v_url
                         else:
                             image_urls.append(furl)
@@ -203,7 +200,7 @@ class PinterestService:
             logger.debug(f"gallery-dl extraction error for Pinterest {target_url}: {e}")
             return None
 
-    async def _extract_from_html(self, resolved_url: str) -> Optional[PinterestData]:
+    async def _extract_from_html(self, resolved_url: str) -> PinterestData | None:
         parsed = urlparse(resolved_url)
         path_parts = [p for p in parsed.path.strip("/").split("/") if p]
 
@@ -244,8 +241,8 @@ class PinterestService:
 
         title = "Pinterest Media"
         uploader = "Pinterest"
-        raw_images: List[str] = []
-        video_candidates: List[Dict[str, Any]] = []
+        raw_images: list[str] = []
+        video_candidates: list[dict[str, Any]] = []
 
         # 1. Parse JSON-LD scripts
         for m in re.finditer(r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>(.*?)</script>', html, re.DOTALL):
@@ -354,8 +351,8 @@ class PinterestService:
                 board_pin_urls=board_pin_urls
             )
 
-        signature_map: Dict[str, str] = {}
-        ordered_signatures: List[str] = []
+        signature_map: dict[str, str] = {}
+        ordered_signatures: list[str] = []
 
         for img_url in raw_images:
             sig = extract_image_signature(img_url)
@@ -409,7 +406,7 @@ class PinterestService:
             is_board=False
         )
 
-    async def extract_data(self, url: str) -> Optional[PinterestData]:
+    async def extract_data(self, url: str) -> PinterestData | None:
         """
         Extract metadata from a Pinterest pin or board URL.
         Uses gallery-dl as primary extractor with HTML parsing as fallback.
@@ -435,7 +432,7 @@ class PinterestService:
         session: aiohttp.ClientSession,
         url: str,
         dest_path: Path
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """
         Download image or video file. If /originals/ returns 403/404, fallback to .png/.jpg or 736x.
         """
@@ -492,15 +489,15 @@ class PinterestService:
         self,
         pin_data: PinterestData,
         download_dir: Path,
-        progress_callback: Optional[Callable[[Any], Any]] = None
-    ) -> Tuple[List[Path], str]:
+        progress_callback: Callable[[Any], Any] | None = None
+    ) -> tuple[list[Path], str]:
         """
         Download pin media files (photos, GIFs, albums, or videos).
         Returns list of downloaded file paths and final media type.
         """
         download_dir.mkdir(parents=True, exist_ok=True)
         task_id = str(uuid.uuid4())[:8]
-        downloaded_paths: List[Path] = []
+        downloaded_paths: list[Path] = []
         final_type = pin_data.media_type
 
         session = await http_client.get_session()
@@ -536,10 +533,11 @@ class PinterestService:
 
             # Fallback for video: try ffmpeg
             if pin_data.video_url:
+                pin_video_url = pin_data.video_url
                 await loop.run_in_executor(
                     None,
                     lambda: subprocess.run(
-                        ["ffmpeg", "-y", "-i", pin_data.video_url, "-c", "copy", str(dest)],
+                        ["ffmpeg", "-y", "-i", pin_video_url, "-c", "copy", str(dest)],
                         capture_output=True,
                         timeout=60
                     )
@@ -557,9 +555,9 @@ class PinterestService:
                 download_tasks.append(self.download_file_with_fallback(session, img_url, dest))
 
             results = await asyncio.gather(*download_tasks, return_exceptions=True)
-            for res in results:
-                if isinstance(res, Path) and res.exists() and res.stat().st_size > 0:
-                    downloaded_paths.append(res)
+            for item in results:
+                if isinstance(item, Path) and item.exists() and item.stat().st_size > 0:
+                    downloaded_paths.append(item)
 
         # If HTTP download yielded no files, fallback to gallery-dl native download
         if not downloaded_paths and pin_data.url:

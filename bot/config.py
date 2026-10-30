@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,10 +11,10 @@ class Settings(BaseSettings):
     )
 
     bot_token: str = ""
-    admin_id: Optional[int] = None
-    local_bot_api_url: Optional[str] = None
+    admin_id: int | None = None
+    local_bot_api_url: str | None = None
     local_bot_api_server_path: str = "/var/lib/telegram-bot-api"
-    telegram_proxy: Optional[str] = None
+    telegram_proxy: str | None = None
     max_file_size_mb: int = 50
     max_playlist_items: int = 20
     max_concurrent_downloads: int = 3

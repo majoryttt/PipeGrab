@@ -1,17 +1,15 @@
 import asyncio
 import html
 import logging
-import os
 import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
-import aiofiles
 import aiohttp
-import yt_dlp
+import yt_dlp  # type: ignore[import-untyped]
 
 from bot.config import settings
 from bot.services.http_client import http_client
@@ -35,7 +33,7 @@ def is_instagram_url(url: str) -> bool:
     return "instagram.com" in netloc or netloc.endswith("instagram.com")
 
 
-def parse_instagram_story_url(url: str) -> Tuple[Optional[str], Optional[str]]:
+def parse_instagram_story_url(url: str) -> tuple[str | None, str | None]:
     """
     Extract username and optional story_id from an Instagram story URL.
     Returns (username, story_id). If highlight, username is 'highlights' and story_id is highlight_id.
@@ -77,12 +75,12 @@ def clean_instagram_url(url: str) -> str:
     return url.split("?")[0]
 
 
-def extract_shortcode(url: str) -> Optional[str]:
+def extract_shortcode(url: str) -> str | None:
     match = re.search(r'/(?:p|reel|tv|stories|share)/([^/?#&]+)', url)
     return match.group(1) if match else None
 
 
-def get_highest_res_thumbnail(thumbnails: List[Dict[str, Any]]) -> Optional[str]:
+def get_highest_res_thumbnail(thumbnails: list[dict[str, Any]]) -> str | None:
     """Find the thumbnail with highest width*height or last in list."""
     if not thumbnails:
         return None
@@ -98,7 +96,7 @@ def get_highest_res_thumbnail(thumbnails: List[Dict[str, Any]]) -> Optional[str]
     return sorted_thumbs[0]["url"]
 
 
-def select_best_video_format(formats: List[Dict[str, Any]]) -> Optional[str]:
+def select_best_video_format(formats: list[dict[str, Any]]) -> str | None:
     """
     Select the best video format URL, prioritizing formats that include an audio track.
     Avoids selecting video-only DASH formats (where acodec is 'none') unless no other format exists.
@@ -106,7 +104,7 @@ def select_best_video_format(formats: List[Dict[str, Any]]) -> Optional[str]:
     if not formats:
         return None
 
-    def _is_video(f: Dict[str, Any]) -> bool:
+    def _is_video(f: dict[str, Any]) -> bool:
         if not f.get("url"):
             return False
         if f.get("vcodec") == "none":
@@ -170,19 +168,19 @@ class InstagramData:
     title: str
     uploader: str
     media_type: str  # 'photo', 'album', 'video'
-    items: List[InstagramItem] = field(default_factory=list)
+    items: list[InstagramItem] = field(default_factory=list)
     duration: int = 0
-    error_message: Optional[str] = None
+    error_message: str | None = None
 
 
 class InstagramService:
     def __init__(self):
         self.headers = INSTAGRAM_HEADERS
 
-    async def _extract_via_gallery_dl(self, url: str) -> Optional[InstagramData]:
+    async def _extract_via_gallery_dl(self, url: str) -> InstagramData | None:
         """Extract Instagram post/reel/story/album using gallery-dl with cookies."""
-        import subprocess
         import json
+        import subprocess
 
         url = clean_instagram_url(url)
         is_story = "/stories/" in url
@@ -202,7 +200,7 @@ class InstagramService:
                         return "AUTH_REQUIRED"
                     return None
                 entries = json.loads(res.stdout) if res.stdout else []
-                items: List[InstagramItem] = []
+                items: list[InstagramItem] = []
                 uploader = story_user or "Instagram User"
                 title = f"История @{uploader}" if is_story else f"Instagram @{uploader}"
                 duration = 0
@@ -239,8 +237,7 @@ class InstagramService:
                         w = int(meta.get("width") or 0)
                         h = int(meta.get("height") or 0)
                         dur = int(meta.get("duration") or 0)
-                        if dur > duration:
-                            duration = dur
+                        duration = max(duration, dur)
                         items.append(InstagramItem(media_type=m_type, url=media_url, width=w, height=h))
 
                 if items:
@@ -274,11 +271,11 @@ class InstagramService:
             return result
         return None
 
-    async def _extract_story_via_gallery_dl(self, url: str) -> Optional[InstagramData]:
+    async def _extract_story_via_gallery_dl(self, url: str) -> InstagramData | None:
         """Extract Instagram story using gallery-dl with cookies."""
         return await self._extract_via_gallery_dl(url)
 
-    async def extract_data(self, url: str) -> Optional[InstagramData]:
+    async def extract_data(self, url: str) -> InstagramData | None:
         """
         Extract Instagram post/reel/story metadata supporting photos, albums, and videos.
         """
@@ -306,10 +303,9 @@ class InstagramService:
 
         # 2. Primary extractor for posts/reels: yt-dlp with ignore_no_formats_error=True
         def _extract_ydl():
-            opts: Dict[str, Any] = {
+            opts: dict[str, Any] = {
                 "quiet": True,
                 "no_warnings": True,
-                "nocheckcertificate": True,
                 "ignore_no_formats_error": True,
                 "extract_flat": False,
                 "user_agent": self.headers["User-Agent"],
@@ -334,12 +330,12 @@ class InstagramService:
             title = info.get("title") or info.get("description") or "Instagram Media"
             if len(title) > 80:
                 title = title[:77] + "..."
-            uploader = info.get("uploader") or info.get("channel") or (story_user if is_story else "Instagram User")
+            uploader = str(info.get("uploader") or info.get("channel") or story_user or "Instagram User")
 
             # Check if it's a playlist / carousel
             is_playlist = info.get("_type") == "playlist" or "entries" in info
             if is_playlist and info.get("entries"):
-                items: List[InstagramItem] = []
+                items: list[InstagramItem] = []
                 for entry in info["entries"]:
                     if not entry:
                         continue
@@ -457,7 +453,7 @@ class InstagramService:
         return None
 
 
-    async def _extract_from_embed(self, url: str) -> Optional[InstagramData]:
+    async def _extract_from_embed(self, url: str) -> InstagramData | None:
         """Extract public Instagram post media from the embed endpoint."""
         shortcode = extract_shortcode(url)
         if not shortcode:
@@ -503,7 +499,7 @@ class InstagramService:
                     image_matches = re.findall(r'<img[^>]+class=["\'][^"\']*EmbeddedMediaImage[^"\']*["\'][^>]+src=["\']([^"\']+)["\']', text)
 
                 if image_matches:
-                    items: List[InstagramItem] = []
+                    items: list[InstagramItem] = []
                     for raw in image_matches:
                         if "," in raw:
                             # Parse srcset and get highest resolution
@@ -535,7 +531,7 @@ class InstagramService:
         self,
         data: InstagramData,
         download_dir: Path
-    ) -> Tuple[List[Path], str]:
+    ) -> tuple[list[Path], str]:
         """
         Download extracted Instagram media items concurrently.
         Returns:

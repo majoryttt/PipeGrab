@@ -1,20 +1,18 @@
-import aiofiles
-import aiohttp
 import logging
-import os
 import shutil
 import time
 from pathlib import Path
-from typing import Tuple
-from aiogram import Bot, Router, types, F
-from aiogram.filters import CommandStart, Command
+
+import aiofiles
+from aiogram import Bot, F, Router, types
+from aiogram.filters import Command, CommandStart
 
 from bot.config import settings
-from bot.services.queue_manager import queue_manager
 from bot.services.cookie_utils import (
-    validate_netscape_cookies,
     parse_cookie_services,
+    validate_netscape_cookies,
 )
+from bot.services.queue_manager import queue_manager
 
 logger = logging.getLogger(__name__)
 
@@ -163,16 +161,18 @@ async def download_telegram_document(bot: Bot, doc: types.Document, destination:
         except Exception:
             pass
     url = bot.session.api.file_url(bot.token, rel_path)
-    async with bot.session.stream_content(url=url, timeout=30, chunk_size=65536) as stream:
-        async with aiofiles.open(destination, "wb") as f:
-            async for chunk in stream:
-                await f.write(chunk)
+    async with aiofiles.open(destination, "wb") as f:
+        async for chunk in bot.session.stream_content(url=url, timeout=30, chunk_size=65536):
+            await f.write(chunk)
     return destination
 
 
 @router.message(F.document)
 async def handle_document_upload(message: types.Message):
     doc = message.document
+    if not doc or not message.from_user or not message.bot:
+        return
+
     filename = (doc.file_name or "").lower()
 
     # Process if file is cookies.txt or contains cookie and ends in .txt
@@ -180,7 +180,7 @@ async def handle_document_upload(message: types.Message):
         return
 
     # Check admin privileges: only ADMIN_ID can upload/modify cookies
-    user_id = message.from_user.id if message.from_user else None
+    user_id = message.from_user.id
     if not settings.admin_id or user_id != settings.admin_id:
         await message.reply(
             "⛔️ <b>Доступ ограничен.</b> Только администратор бота может загружать и изменять cookies.",
@@ -194,7 +194,7 @@ async def handle_document_upload(message: types.Message):
 
     status_msg = await message.reply("⏳ <i>Проверяю и сохраняю cookies...</i>", parse_mode="HTML")
 
-    temp_path = settings.downloads_dir / f"temp_cookies_{message.from_user.id}.txt"
+    temp_path = settings.downloads_dir / f"temp_cookies_{user_id}.txt"
     try:
         await download_telegram_document(message.bot, doc, destination=temp_path)
         content = temp_path.read_text(encoding="utf-8", errors="ignore")

@@ -1,14 +1,12 @@
 import asyncio
 import logging
-import os
 import re
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict, Any, Callable
 from urllib.parse import urlparse
 
-import aiofiles
 import aiohttp
 
 from bot.services.http_client import http_client
@@ -58,10 +56,10 @@ class TikTokData:
     title: str
     uploader: str
     is_photo: bool
-    image_urls: List[str] = field(default_factory=list)
-    video_url: Optional[str] = None
-    music_url: Optional[str] = None
-    music_title: Optional[str] = None
+    image_urls: list[str] = field(default_factory=list)
+    video_url: str | None = None
+    music_url: str | None = None
+    music_title: str | None = None
     duration: int = 0
 
 
@@ -69,10 +67,10 @@ class TikTokService:
     def __init__(self):
         self.headers = TIKTOK_HEADERS
 
-    async def _extract_via_gallery_dl(self, url: str) -> Optional[TikTokData]:
+    async def _extract_via_gallery_dl(self, url: str) -> TikTokData | None:
         """Extract TikTok photo slideshow using gallery-dl."""
-        import subprocess
         import json
+        import subprocess
 
         def _run():
             try:
@@ -83,7 +81,7 @@ class TikTokService:
                 title = "TikTok Photo"
                 uploader = "TikTok User"
                 item_id = ""
-                images: List[str] = []
+                images: list[str] = []
                 music_url = None
                 for item in entries:
                     code = item[0]
@@ -115,7 +113,7 @@ class TikTokService:
 
         return await asyncio.to_thread(_run)
 
-    async def extract_data(self, url: str) -> Optional[TikTokData]:
+    async def extract_data(self, url: str) -> TikTokData | None:
         """
         Extract media metadata from TikTok URL (supports photos, slideshows and videos).
         """
@@ -178,7 +176,7 @@ class TikTokService:
 
         return None
 
-    async def _extract_from_html(self, url: str) -> Optional[TikTokData]:
+    async def _extract_from_html(self, url: str) -> TikTokData | None:
         """Fallback extraction directly from TikTok web page HTML."""
         import json
         try:
@@ -233,8 +231,8 @@ class TikTokService:
         self,
         data: TikTokData,
         download_dir: Path,
-        progress_callback: Optional[Callable] = None
-    ) -> Tuple[List[Path], Optional[Path], str]:
+        progress_callback: Callable | None = None
+    ) -> tuple[list[Path], Path | None, str]:
         """
         Download TikTok media.
         Fast-path:

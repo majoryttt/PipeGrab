@@ -1,33 +1,48 @@
 import asyncio
 import html
 import logging
-import os
 import re
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, List
 
-from aiogram import Bot, Router, types, F
+from aiogram import Bot, F, Router, types
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
-from aiogram.types import FSInputFile, CallbackQuery, InputMediaPhoto, InputMediaVideo, InputMediaDocument
+from aiogram.types import (
+    CallbackQuery,
+    FSInputFile,
+    InputMediaAudio,
+    InputMediaDocument,
+    InputMediaLivePhoto,
+    InputMediaPhoto,
+    InputMediaVideo,
+)
+
+type MediaGroupItem = (
+    InputMediaAudio
+    | InputMediaDocument
+    | InputMediaLivePhoto
+    | InputMediaPhoto
+    | InputMediaVideo
+)
 
 from bot.config import settings
 from bot.keyboards.inline import (
+    get_cached_message_id,
+    get_cached_url,
     get_download_format_kb,
     get_playlist_kb,
-    get_cached_url,
-    get_cached_message_id,
 )
 from bot.services.downloader import (
-    downloader_service,
-    extract_first_url,
-    detect_platform,
-    Platform,
-    MediaType,
     DownloadProgress,
     MediaInfo,
+    MediaType,
+    Platform,
+    detect_platform,
+    downloader_service,
+    extract_first_url,
 )
 from bot.services.ffmpeg_utils import convert_to_video_note
 from bot.services.queue_manager import queue_manager
@@ -37,12 +52,14 @@ logger = logging.getLogger(__name__)
 router = Router(name="download_router")
 
 
-def cleanup_messages_in_background(bot: Bot, chat_id: int, message_ids: list[Optional[int]]):
+def cleanup_messages_in_background(bot: Bot | None, chat_id: int, message_ids: Sequence[int | None]):
     """
     Fire-and-forget non-blocking deletion of status and source messages.
     Uses batch delete_messages (Bot API 7.0+) for a single network call,
     with fallback to individual deletion.
     """
+    if bot is None:
+        return
     valid_ids = [m for m in message_ids if m is not None]
     if not valid_ids:
         return
@@ -73,12 +90,13 @@ def format_progress_bar(percent: float, length: int = 10) -> str:
     return "█" * filled + "░" * (length - filled)
 
 
-def format_size(bytes_num: int) -> str:
+def format_size(bytes_num: float | int) -> str:
+    val = float(bytes_num)
     for unit in ['B', 'KB', 'MB', 'GB']:
-        if bytes_num < 1024.0:
-            return f"{bytes_num:.1f} {unit}"
-        bytes_num /= 1024.0
-    return f"{bytes_num:.1f} TB"
+        if val < 1024.0:
+            return f"{val:.1f} {unit}"
+        val /= 1024.0
+    return f"{val:.1f} TB"
 
 
 def format_eta(seconds: int) -> str:
@@ -97,7 +115,7 @@ def build_safe_caption(
     title: str,
     url: str,
     platform_name: str,
-    uploader: Optional[str] = None,
+    uploader: str | None = None,
     prefix: str = "🎬",
     extra: str = ""
 ) -> str:
@@ -136,9 +154,9 @@ async def update_status_safely(message: types.Message, text: str):
 
 
 async def send_media_album_robust(
-    bot: Bot,
+    bot: Bot | None,
     chat_id: int,
-    valid_files: List[Path],
+    valid_files: list[Path],
     title: str,
     url: str,
     platform_name: str,
@@ -152,6 +170,10 @@ async def send_media_album_robust(
       item, sending it as a Document, and retrying the rest of the album as photos.
     - Fallback to InputMediaDocument if photo processing fails for the whole group.
     """
+    if bot is None:
+        logger.error("bot is None in send_media_album_robust")
+        return False
+
     chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
     for chunk_idx, chunk in enumerate(chunks):
         files_in_chunk = list(chunk)
@@ -171,7 +193,7 @@ async def send_media_album_robust(
             if chunk_idx == 0 else None
         )
 
-        async def _attempt_send(current_files: List[Path], caption_text: Optional[str], parse_mode: Optional[str]) -> bool:
+        async def _attempt_send(current_files: list[Path], caption_text: str | None, parse_mode: str | None) -> bool:
             if not current_files:
                 return True
             if len(current_files) == 1:
@@ -182,7 +204,7 @@ async def send_media_album_robust(
                     await bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(fpath)), caption=caption_text, parse_mode=parse_mode)
                 return True
 
-            group = []
+            group: list[MediaGroupItem] = []
             for idx, fpath in enumerate(current_files):
                 c = caption_text if idx == 0 else None
                 pm = parse_mode if idx == 0 else None
@@ -226,7 +248,7 @@ async def send_media_album_robust(
 
                     # If specific index wasn't matched or removing didn't solve it, send entire chunk as Documents
                     logger.warning(f"Falling back to sending album chunk as documents due to {err}")
-                    doc_group = []
+                    doc_group: list[MediaGroupItem] = []
                     for idx, fpath in enumerate(current_files):
                         c = caption_text if idx == 0 else None
                         pm = parse_mode if idx == 0 else None
@@ -256,6 +278,8 @@ async def handle_circle_command(message: types.Message):
     - Direct command with URL (/circle https://...) -> download video and convert to circle note
     - Attached video with caption /circle -> convert to circle note
     """
+    if not message.from_user:
+        return
     user_id = message.from_user.id
     text = message.text or message.caption or ""
 
@@ -264,7 +288,7 @@ async def handle_circle_command(message: types.Message):
 
     # 2. Check for attached media or reply_to_message
     reply = message.reply_to_message
-    target_media = None
+    target_media: types.Video | types.Animation | types.VideoNote | types.Document | None = None
 
     if message.video:
         target_media = message.video
@@ -312,18 +336,22 @@ async def handle_circle_command(message: types.Message):
         )
         return
 
+    bot = message.bot
+    if not bot:
+        return
+
     status_msg = await message.reply("⚡ <i>Обрабатываю видео в кружок...</i>", parse_mode="HTML")
     task_id = str(uuid.uuid4())[:8]
-    temp_files: List[Path] = []
+    temp_files: list[Path] = []
 
     try:
         async with queue_manager.acquire(user_id):
-            source_video_path: Optional[Path] = None
+            source_video_path: Path | None = None
 
             if target_media:
                 in_path = settings.downloads_dir / f"{task_id}_input.mp4"
                 temp_files.append(in_path)
-                await message.bot.download(target_media, destination=in_path)
+                await bot.download(target_media, destination=in_path)
                 if in_path.exists() and in_path.stat().st_size > 0:
                     source_video_path = in_path
             elif url:
@@ -360,7 +388,7 @@ async def handle_circle_command(message: types.Message):
                 await status_msg.edit_text("❌ <b>Ошибка при конвертации видео в кружок.</b>", parse_mode="HTML")
                 return
 
-            await message.bot.send_video_note(
+            await bot.send_video_note(
                 chat_id=message.chat.id,
                 video_note=FSInputFile(str(circle_res)),
                 reply_to_message_id=message.message_id
@@ -388,6 +416,9 @@ async def handle_circle_command(message: types.Message):
 
 @router.message(F.text)
 async def handle_text_message(message: types.Message):
+    if not message.text or not message.from_user:
+        return
+
     text = message.text.strip()
     url = extract_first_url(text)
 
@@ -531,15 +562,20 @@ async def handle_text_message(message: types.Message):
 
 @router.callback_query(F.data.startswith("dl:"))
 async def handle_download_callback(callback: CallbackQuery):
+    if not callback.data:
+        return
     parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
     action = parts[1]
 
     if action == "cancel":
         await callback.answer("Загрузка отменена")
-        try:
-            await callback.message.delete()
-        except Exception:
-            await callback.message.edit_text("❌ <i>Отменено</i>", parse_mode="HTML")
+        if isinstance(callback.message, types.Message):
+            try:
+                await callback.message.delete()
+            except Exception:
+                await callback.message.edit_text("❌ <i>Отменено</i>", parse_mode="HTML")
         return
 
     cid = parts[2]
@@ -553,18 +589,23 @@ async def handle_download_callback(callback: CallbackQuery):
         await callback.answer("У вас уже есть активная загрузка!", show_alert=True)
         return
 
+    status_msg = callback.message
+    if not isinstance(status_msg, types.Message):
+        await callback.answer("Сообщение недоступно", show_alert=True)
+        return
+
     await callback.answer()
     audio_only = (action == "audio")
     orig_msg_id = get_cached_message_id(cid)
-    if not orig_msg_id and callback.message and callback.message.reply_to_message:
-        orig_msg_id = callback.message.reply_to_message.message_id
+    if not orig_msg_id and status_msg.reply_to_message:
+        orig_msg_id = status_msg.reply_to_message.message_id
 
     asyncio.create_task(
         run_download_task(
-            chat_id=callback.message.chat.id,
+            chat_id=status_msg.chat.id,
             user_id=user_id,
             url=url,
-            status_msg=callback.message,
+            status_msg=status_msg,
             audio_only=audio_only,
             original_message_id=orig_msg_id
         )
@@ -573,7 +614,11 @@ async def handle_download_callback(callback: CallbackQuery):
 
 @router.callback_query(F.data.startswith("pl:"))
 async def handle_playlist_callback(callback: CallbackQuery):
+    if not callback.data:
+        return
     parts = callback.data.split(":")
+    if len(parts) < 3:
+        return
     choice = parts[1]
     cid = parts[2]
 
@@ -587,6 +632,11 @@ async def handle_playlist_callback(callback: CallbackQuery):
         await callback.answer("У вас уже есть активная загрузка!", show_alert=True)
         return
 
+    status_msg = callback.message
+    if not isinstance(status_msg, types.Message):
+        await callback.answer("Сообщение недоступно", show_alert=True)
+        return
+
     await callback.answer()
 
     audio_only = choice.startswith("a")
@@ -597,15 +647,15 @@ async def handle_playlist_callback(callback: CallbackQuery):
         max_count = 5
 
     orig_msg_id = get_cached_message_id(cid)
-    if not orig_msg_id and callback.message and callback.message.reply_to_message:
-        orig_msg_id = callback.message.reply_to_message.message_id
+    if not orig_msg_id and status_msg.reply_to_message:
+        orig_msg_id = status_msg.reply_to_message.message_id
 
     asyncio.create_task(
         run_playlist_task(
-            chat_id=callback.message.chat.id,
+            chat_id=status_msg.chat.id,
             user_id=user_id,
             url=url,
-            status_msg=callback.message,
+            status_msg=status_msg,
             max_items=max_count,
             audio_only=audio_only,
             original_message_id=orig_msg_id
@@ -619,17 +669,22 @@ async def run_download_task(
     url: str,
     status_msg: types.Message,
     audio_only: bool,
-    original_message_id: Optional[int] = None
+    original_message_id: int | None = None
 ):
-    media: Optional[MediaInfo] = None
+    media: MediaInfo | None = None
     action_task = None
+    bot = status_msg.bot
+    if not bot:
+        logger.error("status_msg.bot is None in run_download_task")
+        return
+
     try:
         # Background chat action loop to show native Telegram uploading indicator
         async def _action_loop():
             try:
                 act = "upload_document" if audio_only else "upload_video"
                 while True:
-                    await status_msg.bot.send_chat_action(chat_id=chat_id, action=act)
+                    await bot.send_chat_action(chat_id=chat_id, action=act)
                     await asyncio.sleep(4.5)
             except (asyncio.CancelledError, Exception):
                 pass
@@ -734,7 +789,7 @@ async def run_download_task(
                             uploader=media.uploader,
                             prefix=photo_prefix
                         )
-                        await status_msg.bot.send_photo(
+                        await bot.send_photo(
                             chat_id=chat_id,
                             photo=FSInputFile(str(media.file_path)),
                             caption=p_caption,
@@ -747,7 +802,7 @@ async def run_download_task(
                             platform_name=platform_title,
                             prefix="📌"
                         )
-                        await status_msg.bot.send_animation(
+                        await bot.send_animation(
                             chat_id=chat_id,
                             animation=FSInputFile(str(media.file_path)),
                             caption=p_caption,
@@ -756,7 +811,7 @@ async def run_download_task(
                     elif media.media_type == MediaType.ALBUM:
                         valid_files = [f for f in media.file_paths if f.exists()]
                         await send_media_album_robust(
-                            bot=status_msg.bot,
+                            bot=bot,
                             chat_id=chat_id,
                             valid_files=valid_files,
                             title=media.title,
@@ -770,7 +825,7 @@ async def run_download_task(
                             platform_name=platform_title,
                             prefix="🎵"
                         )
-                        await status_msg.bot.send_audio(
+                        await bot.send_audio(
                             chat_id=chat_id,
                             audio=FSInputFile(str(media.file_path)),
                             title=truncate_text(media.title, 100),
@@ -781,7 +836,7 @@ async def run_download_task(
                         )
                     else:  # VIDEO
                         thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
-                        await status_msg.bot.send_video(
+                        await bot.send_video(
                             chat_id=chat_id,
                             video=FSInputFile(str(media.file_path)),
                             duration=media.duration,
@@ -796,13 +851,13 @@ async def run_download_task(
                     logger.warning(f"TelegramBadRequest sending HTML media ({tb_err}), retrying with plain text")
                     plain_caption = f"{truncate_text(media.title, 900)}\n{url}"
                     if media.media_type == MediaType.PHOTO:
-                        await status_msg.bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_caption)
+                        await bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_caption)
                     elif media.media_type == MediaType.ANIMATION:
-                        await status_msg.bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(media.file_path)), caption=plain_caption)
+                        await bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(media.file_path)), caption=plain_caption)
                     elif media.media_type == MediaType.ALBUM:
                         valid_files = [f for f in media.file_paths if f.exists()]
                         await send_media_album_robust(
-                            bot=status_msg.bot,
+                            bot=bot,
                             chat_id=chat_id,
                             valid_files=valid_files,
                             title=media.title,
@@ -810,7 +865,7 @@ async def run_download_task(
                             platform_name=platform_title,
                         )
                     elif audio_only or media.media_type == MediaType.AUDIO:
-                        await status_msg.bot.send_audio(
+                        await bot.send_audio(
                             chat_id=chat_id,
                             audio=FSInputFile(str(media.file_path)),
                             title=truncate_text(media.title, 100),
@@ -820,7 +875,7 @@ async def run_download_task(
                         )
                     else:
                         thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
-                        await status_msg.bot.send_video(
+                        await bot.send_video(
                             chat_id=chat_id,
                             video=FSInputFile(str(media.file_path)),
                             duration=media.duration,
@@ -840,14 +895,14 @@ async def run_download_task(
                         prefix="🎵"
                     )
                     try:
-                        await status_msg.bot.send_audio(
+                        await bot.send_audio(
                             chat_id=chat_id,
                             audio=FSInputFile(str(media.audio_path)),
                             caption=audio_caption,
                             parse_mode="HTML"
                         )
                     except TelegramBadRequest:
-                        await status_msg.bot.send_audio(
+                        await bot.send_audio(
                             chat_id=chat_id,
                             audio=FSInputFile(str(media.audio_path)),
                             caption=f"🎵 Звук из публикации: {truncate_text(media.title, 400)}\n{url}"
@@ -859,7 +914,7 @@ async def run_download_task(
                 to_delete = [status_msg.message_id]
                 if settings.delete_source_message and original_message_id:
                     to_delete.append(original_message_id)
-                cleanup_messages_in_background(status_msg.bot, chat_id, to_delete)
+                cleanup_messages_in_background(bot, chat_id, to_delete)
             except Exception as send_err:
                 logger.error(f"Error sending media to chat {chat_id}: {send_err}")
                 esc_err = html.escape(str(send_err))
@@ -896,8 +951,13 @@ async def run_playlist_task(
     status_msg: types.Message,
     max_items: int,
     audio_only: bool,
-    original_message_id: Optional[int] = None
+    original_message_id: int | None = None
 ):
+    bot = status_msg.bot
+    if not bot:
+        logger.error("status_msg.bot is None in run_playlist_task")
+        return
+
     try:
         async with queue_manager.acquire(user_id):
             await update_status_safely(status_msg, f"🔍 <i>Получаю список элементов (до {max_items})...</i>")
@@ -931,14 +991,14 @@ async def run_playlist_task(
                             extra=f"({index}/{total_items})"
                         )
                         if media.media_type == MediaType.PHOTO:
-                            await status_msg.bot.send_photo(
+                            await bot.send_photo(
                                 chat_id=chat_id,
                                 photo=FSInputFile(str(media.file_path)),
                                 caption=caption,
                                 parse_mode="HTML"
                             )
                         elif audio_only or media.media_type == MediaType.AUDIO:
-                            await status_msg.bot.send_audio(
+                            await bot.send_audio(
                                 chat_id=chat_id,
                                 audio=FSInputFile(str(media.file_path)),
                                 title=truncate_text(media.title, 100),
@@ -949,7 +1009,7 @@ async def run_playlist_task(
                             )
                         else:
                             thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
-                            await status_msg.bot.send_video(
+                            await bot.send_video(
                                 chat_id=chat_id,
                                 video=FSInputFile(str(media.file_path)),
                                 duration=media.duration,
@@ -963,12 +1023,12 @@ async def run_playlist_task(
                     except TelegramBadRequest:
                         plain_cap = f"{truncate_text(media.title, 800)} ({index}/{total_items})\n{item_url}"
                         if media.media_type == MediaType.PHOTO:
-                            await status_msg.bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_cap)
+                            await bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_cap)
                         elif audio_only or media.media_type == MediaType.AUDIO:
-                            await status_msg.bot.send_audio(chat_id=chat_id, audio=FSInputFile(str(media.file_path)), caption=plain_cap)
+                            await bot.send_audio(chat_id=chat_id, audio=FSInputFile(str(media.file_path)), caption=plain_cap)
                         else:
                             thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
-                            await status_msg.bot.send_video(chat_id=chat_id, video=FSInputFile(str(media.file_path)), thumbnail=thumb_file, caption=plain_cap, supports_streaming=True)
+                            await bot.send_video(chat_id=chat_id, video=FSInputFile(str(media.file_path)), thumbnail=thumb_file, caption=plain_cap, supports_streaming=True)
                     except Exception as e:
                         logger.error(f"Failed to send item {index}: {e}")
                     finally:
@@ -985,7 +1045,7 @@ async def run_playlist_task(
 
             await update_status_safely(status_msg, f"✅ <b>Завершено!</b> Отправлено: {total_items}")
             if settings.delete_source_message and original_message_id:
-                cleanup_messages_in_background(status_msg.bot, chat_id, [original_message_id])
+                cleanup_messages_in_background(bot, chat_id, [original_message_id])
 
     except ValueError:
         await update_status_safely(status_msg, "⏳ У вас уже есть активная задача загрузки.")

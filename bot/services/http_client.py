@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any
 
 import aiofiles
 import aiohttp
@@ -27,7 +27,7 @@ class HTTPClient:
     - High-speed streaming file downloads
     """
     def __init__(self):
-        self._session: Optional[aiohttp.ClientSession] = None
+        self._session: aiohttp.ClientSession | None = None
         self._lock = asyncio.Lock()
 
     async def get_session(self) -> aiohttp.ClientSession:
@@ -53,7 +53,7 @@ class HTTPClient:
         self,
         url: str,
         dest_path: Path,
-        headers: Optional[Dict[str, str]] = None,
+        headers: dict[str, str] | None = None,
         chunk_size: int = 128 * 1024,
     ) -> bool:
         """
@@ -88,9 +88,9 @@ class HTTPClient:
     async def get_json(
         self,
         url: str,
-        headers: Optional[Dict[str, str]] = None,
-        timeout_seconds: Optional[int] = None,
-    ) -> Optional[Dict[str, Any]]:
+        headers: dict[str, str] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any] | None:
         """Fetch and parse JSON from a given URL."""
         session = await self.get_session()
         req_headers = {**DEFAULT_HEADERS, **(headers or {})}
@@ -108,9 +108,9 @@ class HTTPClient:
     async def get_text(
         self,
         url: str,
-        headers: Optional[Dict[str, str]] = None,
-        timeout_seconds: Optional[int] = None,
-    ) -> Optional[str]:
+        headers: dict[str, str] | None = None,
+        timeout_seconds: int | None = None,
+    ) -> str | None:
         """Fetch raw text/HTML from a given URL."""
         session = await self.get_session()
         req_headers = {**DEFAULT_HEADERS, **(headers or {})}
