@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -75,7 +76,14 @@ class HTTPClient:
                     except (TypeError, AttributeError):
                         content = await resp.read()
                         await f.write(content)
-            return dest_path.exists() and dest_path.stat().st_size > 0
+            if dest_path.exists() and dest_path.stat().st_size > 0:
+                return True
+            if dest_path.exists():
+                try:
+                    dest_path.unlink()
+                except Exception:
+                    pass
+            return False
         except Exception as e:
             logger.warning(f"Error downloading file from {url} to {dest_path}: {e}")
             if dest_path.exists():
@@ -84,6 +92,22 @@ class HTTPClient:
                 except Exception:
                     pass
             return False
+
+    async def download_files_batch(
+        self,
+        tasks: Sequence[tuple[str, Path]],  # (url, dest_path)
+        headers: dict[str, str] | None = None,
+    ) -> list[Path]:
+        """
+        Download multiple files concurrently using download_file.
+        Returns a list of successfully downloaded Path objects.
+        """
+        coros = [self.download_file(url, path, headers=headers) for url, path in tasks]
+        results = await asyncio.gather(*coros, return_exceptions=True)
+        return [
+            path for (url, path), res in zip(tasks, results)
+            if res is True and path.exists() and path.stat().st_size > 0
+        ]
 
     async def get_json(
         self,

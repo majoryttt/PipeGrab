@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-import aiofiles
 import aiohttp
 
+from bot.services.gallery_dl_utils import run_gallery_dl_json_sync
 from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
@@ -94,16 +94,11 @@ class PinterestService:
         Returns PinterestData if successful, None otherwise.
         """
         try:
-            cmd = ["gallery-dl", "-j", target_url]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
-            if res.returncode != 0 or not res.stdout.strip():
-                logger.debug(f"gallery-dl returned {res.returncode} for {target_url}: {res.stderr}")
+            res = run_gallery_dl_json_sync(target_url, use_cookies=False, timeout_seconds=25)
+            if not res.entries:
                 return None
 
-            data = json.loads(res.stdout)
-            if not isinstance(data, list) or not data:
-                return None
-
+            data = res.entries
             pin_id = ""
             title = "Pinterest Media"
             uploader = "Pinterest"
@@ -112,11 +107,7 @@ class PinterestService:
             board_pin_urls: list[str] = []
 
             # Check if this was a board or multi-pin feed
-            directories = [
-                item[1] for item in data
-                if isinstance(item, list) and len(item) >= 2 and item[0] == 2 and isinstance(item[1], dict)
-            ]
-
+            directories = res.all_metadata
             if len(directories) > 1:
                 for d in directories:
                     pid = str(d.get("id") or "")
@@ -469,13 +460,8 @@ class PinterestService:
                             actual_ext = ".mp4"
 
                         final_dest = dest_path.with_suffix(actual_ext)
-                        async with aiofiles.open(final_dest, "wb") as f:
-                            while True:
-                                chunk = await resp.content.read(64 * 1024)
-                                if not chunk:
-                                    break
-                                await f.write(chunk)
-                        return final_dest
+                        if await http_client.download_file(candidate_url, final_dest, headers=self.headers):
+                            return final_dest
                     elif resp.status in [403, 404]:
                         continue
             except Exception as e:
@@ -548,16 +534,11 @@ class PinterestService:
 
         # 2. Image / Album / GIF pin concurrently
         if pin_data.image_urls:
-            download_tasks = []
-            for idx, img_url in enumerate(pin_data.image_urls, 1):
-                ext = ".gif" if img_url.lower().endswith(".gif") else ".jpg"
-                dest = download_dir / f"{task_id}_pin_{idx}{ext}"
-                download_tasks.append(self.download_file_with_fallback(session, img_url, dest))
-
-            results = await asyncio.gather(*download_tasks, return_exceptions=True)
-            for item in results:
-                if isinstance(item, Path) and item.exists() and item.stat().st_size > 0:
-                    downloaded_paths.append(item)
+            batch_tasks = [
+                (img_url, download_dir / f"{task_id}_pin_{idx}{'.gif' if img_url.lower().endswith('.gif') else '.jpg'}")
+                for idx, img_url in enumerate(pin_data.image_urls, 1)
+            ]
+            downloaded_paths = await http_client.download_files_batch(batch_tasks, headers=self.headers)
 
         # If HTTP download yielded no files, fallback to gallery-dl native download
         if not downloaded_paths and pin_data.url:

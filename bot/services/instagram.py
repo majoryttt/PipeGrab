@@ -12,6 +12,7 @@ import aiohttp
 import yt_dlp  # type: ignore[import-untyped]
 
 from bot.config import settings
+from bot.services.gallery_dl_utils import run_gallery_dl_json
 from bot.services.http_client import http_client
 
 logger = logging.getLogger(__name__)
@@ -179,85 +180,13 @@ class InstagramService:
 
     async def _extract_via_gallery_dl(self, url: str) -> InstagramData | None:
         """Extract Instagram post/reel/story/album using gallery-dl with cookies."""
-        import json
-        import subprocess
-
         url = clean_instagram_url(url)
         is_story = "/stories/" in url
         story_user, story_id = parse_instagram_story_url(url) if is_story else (None, None)
         shortcode = extract_shortcode(url) or "instagram_media"
 
-        def _run():
-            try:
-                cmd = ["gallery-dl", "-j"]
-                if settings.has_cookies:
-                    cmd.extend(["--cookies", str(settings.cookies_file)])
-                cmd.append(url)
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                if res.returncode != 0:
-                    err_str = (res.stderr or "").lower()
-                    if any(t in err_str for t in ["auth", "login", "cookie", "not found", "redirect to login"]):
-                        return "AUTH_REQUIRED"
-                    return None
-                entries = json.loads(res.stdout) if res.stdout else []
-                items: list[InstagramItem] = []
-                uploader = story_user or "Instagram User"
-                title = f"История @{uploader}" if is_story else f"Instagram @{uploader}"
-                duration = 0
-
-                for item in entries:
-                    code = item[0]
-                    if code == -1 and isinstance(item[1], dict):
-                        msg = item[1].get("message", "").lower()
-                        if any(t in msg for t in ["auth", "login", "cookie", "not found", "redirect to login"]):
-                            return "AUTH_REQUIRED"
-                    elif code == 2 and isinstance(item[1], dict):
-                        d = item[1]
-                        uploader = d.get("user", {}).get("username") or d.get("username") or uploader
-                        caption = d.get("caption") or d.get("description") or ""
-                        if caption:
-                            clean_caption = caption.strip()
-                            title = clean_caption[:77] + "..." if len(clean_caption) > 80 else clean_caption
-                        elif is_story:
-                            title = f"История @{uploader}" if not story_id else f"История @{uploader} ({story_id})"
-                    elif code == 3 and isinstance(item[1], str):
-                        media_url = item[1]
-                        meta = item[2] if len(item) > 2 and isinstance(item[2], dict) else {}
-                        # If gallery-dl gave a ytdl: URL, get the direct progressive fallback URL from meta
-                        if media_url.startswith("ytdl:"):
-                            fallback = meta.get("_fallback")
-                            if fallback and len(fallback) > 0:
-                                media_url = fallback[0]
-                            elif meta.get("video_url"):
-                                media_url = meta.get("video_url")
-
-                        ext = (meta.get("extension") or "").lower()
-                        is_video = ext in ["mp4", "mov", "mkv", "webm"] or ".mp4" in media_url or bool(meta.get("video_url"))
-                        m_type = "video" if is_video else "photo"
-                        w = int(meta.get("width") or 0)
-                        h = int(meta.get("height") or 0)
-                        dur = int(meta.get("duration") or 0)
-                        duration = max(duration, dur)
-                        items.append(InstagramItem(media_type=m_type, url=media_url, width=w, height=h))
-
-                if items:
-                    final_media_type = "album" if len(items) > 1 else items[0].media_type
-                    return InstagramData(
-                        url=url,
-                        shortcode=story_id or story_user or shortcode if is_story else shortcode,
-                        title=title,
-                        uploader=uploader,
-                        media_type=final_media_type,
-                        items=items,
-                        duration=duration
-                    )
-            except Exception as e:
-                logger.warning(f"gallery-dl extraction failed for {url}: {e}")
-            return None
-
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, _run)
-        if result == "AUTH_REQUIRED":
+        res = await run_gallery_dl_json(url, use_cookies=True, timeout_seconds=30)
+        if res.auth_required:
             err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else "AUTH_REQUIRED_INSTAGRAM"
             return InstagramData(
                 url=url,
@@ -267,8 +196,56 @@ class InstagramService:
                 media_type="video",
                 error_message=err_code
             )
-        if isinstance(result, InstagramData):
-            return result
+
+        if not res.media_items:
+            return None
+
+        items: list[InstagramItem] = []
+        uploader = story_user or "Instagram User"
+        title = f"История @{uploader}" if is_story else f"Instagram @{uploader}"
+        duration = 0
+
+        if res.metadata:
+            d = res.metadata
+            uploader = d.get("user", {}).get("username") or d.get("username") or uploader
+            caption = d.get("caption") or d.get("description") or ""
+            if caption:
+                clean_caption = caption.strip()
+                title = clean_caption[:77] + "..." if len(clean_caption) > 80 else clean_caption
+            elif is_story:
+                title = f"История @{uploader}" if not story_id else f"История @{uploader} ({story_id})"
+
+        for media_url, meta in res.media_items:
+            # If gallery-dl gave a ytdl: URL, get the direct progressive fallback URL from meta
+            if media_url.startswith("ytdl:"):
+                fallback = meta.get("_fallback")
+                if fallback and len(fallback) > 0 and isinstance(fallback[0], str):
+                    media_url = fallback[0]
+                else:
+                    video_url = meta.get("video_url")
+                    if isinstance(video_url, str):
+                        media_url = video_url
+
+            ext = (meta.get("extension") or "").lower()
+            is_video = ext in ["mp4", "mov", "mkv", "webm"] or ".mp4" in media_url or bool(meta.get("video_url"))
+            m_type = "video" if is_video else "photo"
+            w = int(meta.get("width") or 0)
+            h = int(meta.get("height") or 0)
+            dur = int(meta.get("duration") or 0)
+            duration = max(duration, dur)
+            items.append(InstagramItem(media_type=m_type, url=media_url, width=w, height=h))
+
+        if items:
+            final_media_type = "album" if len(items) > 1 else items[0].media_type
+            return InstagramData(
+                url=url,
+                shortcode=story_id or story_user or shortcode if is_story else shortcode,
+                title=title,
+                uploader=uploader,
+                media_type=final_media_type,
+                items=items,
+                duration=duration,
+            )
         return None
 
     async def _extract_story_via_gallery_dl(self, url: str) -> InstagramData | None:
@@ -540,20 +517,11 @@ class InstagramService:
         task_id = str(uuid.uuid4())[:8]
         download_dir.mkdir(parents=True, exist_ok=True)
 
-        download_tasks = []
-        file_paths = []
-        for idx, item in enumerate(data.items, 1):
-            ext = "mp4" if item.media_type == "video" else "jpg"
-            file_path = download_dir / f"{task_id}_item_{idx}.{ext}"
-            file_paths.append(file_path)
-            download_tasks.append(http_client.download_file(item.url, file_path, headers=self.headers))
-
-        results = await asyncio.gather(*download_tasks, return_exceptions=True)
-
-        downloaded_files = [
-            fp for fp, res in zip(file_paths, results)
-            if res is True and fp.exists() and fp.stat().st_size > 0
+        batch_tasks = [
+            (item.url, download_dir / f"{task_id}_item_{idx}.{'mp4' if item.media_type == 'video' else 'jpg'}")
+            for idx, item in enumerate(data.items, 1)
         ]
+        downloaded_files = await http_client.download_files_batch(batch_tasks, headers=self.headers)
 
         final_media_type = data.media_type
         if len(downloaded_files) == 1 and final_media_type == "album":

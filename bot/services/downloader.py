@@ -136,6 +136,43 @@ class DownloaderService:
         if not info.error_message:
             self._cache[url] = (time.time(), info)
 
+    async def _build_media_info(
+        self,
+        files: list[Path],
+        final_type: str,
+        title: str,
+        uploader: str,
+        url: str,
+        platform: Platform,
+        duration: int = 0,
+        audio_path: Path | None = None,
+    ) -> MediaInfo | None:
+        """Construct MediaInfo object with thumbnail and total file size for downloaded files."""
+        if not files or not files[0].exists():
+            return None
+
+        thumb_path = None
+        if final_type == "video" and files[0].exists():
+            candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
+            thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
+
+        total_size = sum(f.stat().st_size for f in files if f.exists())
+        return MediaInfo(
+            title=title,
+            duration=duration,
+            uploader=uploader,
+            is_playlist=False,
+            playlist_count=0,
+            platform=platform,
+            url=url,
+            media_type=MediaType(final_type),
+            file_path=files[0],
+            file_paths=files,
+            file_size=total_size,
+            thumbnail_path=thumb_path,
+            audio_path=audio_path,
+        )
+
     def _get_base_ydl_opts(self, platform: Platform | None = None, use_cookies: bool = True) -> dict[str, Any]:
         opts: dict[str, Any] = {
             "quiet": True,
@@ -361,25 +398,14 @@ class DownloaderService:
                         progress_callback=progress_callback
                     )
                     if files:
-                        total_size = sum(f.stat().st_size for f in files if f.exists())
-                        thumb_path = None
-                        if final_type == "video" and files[0].exists():
-                            candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
-                            thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
-
-                        return MediaInfo(
+                        return await self._build_media_info(
+                            files=files,
+                            final_type=final_type,
                             title=pin_data.title,
-                            duration=pin_data.duration,
                             uploader=pin_data.uploader,
-                            is_playlist=False,
-                            playlist_count=0,
-                            platform=Platform.PINTEREST,
                             url=pin_data.url,
-                            media_type=MediaType(final_type),
-                            file_path=files[0],
-                            file_paths=files,
-                            file_size=total_size,
-                            thumbnail_path=thumb_path
+                            platform=Platform.PINTEREST,
+                            duration=pin_data.duration,
                         )
             except Exception as pe:
                 logger.warning(f"Pinterest direct download failed for {url}: {pe}")
@@ -396,26 +422,15 @@ class DownloaderService:
                         progress_callback=progress_callback
                     )
                     if files:
-                        total_size = sum(f.stat().st_size for f in files if f.exists())
-                        thumb_path = None
-                        if final_type == "video" and files[0].exists():
-                            candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
-                            thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
-
-                        return MediaInfo(
+                        return await self._build_media_info(
+                            files=files,
+                            final_type=final_type,
                             title=tk_data.title,
-                            duration=tk_data.duration,
                             uploader=tk_data.uploader,
-                            is_playlist=False,
-                            playlist_count=0,
-                            platform=Platform.TIKTOK,
                             url=tk_data.url,
-                            media_type=MediaType(final_type),
-                            file_path=files[0],
-                            file_paths=files,
-                            file_size=total_size,
-                            thumbnail_path=thumb_path,
-                            audio_path=audio_path
+                            platform=Platform.TIKTOK,
+                            duration=tk_data.duration,
+                            audio_path=audio_path,
                         )
             except Exception as te:
                 logger.warning(f"TikTok direct download failed for {url}: {te}")
@@ -445,25 +460,14 @@ class DownloaderService:
                         if ig_data.items:
                             files, final_type = await instagram_service.download_media(ig_data, self.download_dir)
                             if files:
-                                total_size = sum(f.stat().st_size for f in files if f.exists())
-                                thumb_path = None
-                                if final_type == "video" and files[0].exists():
-                                    candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
-                                    thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
-
-                                return MediaInfo(
+                                return await self._build_media_info(
+                                    files=files,
+                                    final_type=final_type,
                                     title=ig_data.title,
-                                    duration=ig_data.duration,
                                     uploader=ig_data.uploader,
-                                    is_playlist=False,
-                                    playlist_count=0,
-                                    platform=Platform.INSTAGRAM,
                                     url=url,
-                                    media_type=MediaType(final_type),
-                                    file_path=files[0],
-                                    file_paths=files,
-                                    file_size=total_size,
-                                    thumbnail_path=thumb_path
+                                    platform=Platform.INSTAGRAM,
+                                    duration=ig_data.duration,
                                 )
             except Exception as ie:
                 logger.warning(f"Instagram direct download failed for {url}: {ie}")
@@ -628,24 +632,14 @@ class DownloaderService:
                     if pin_data:
                         files, final_type = await pinterest_service.download_pin(pin_data, self.download_dir)
                         if files:
-                            thumb_path = None
-                            if final_type == "video" and files[0].exists():
-                                candidate_thumb = self.download_dir / f"{files[0].stem}_thumb.jpg"
-                                thumb_path = await generate_thumbnail(files[0], candidate_thumb, timestamp=0.5)
-
-                            return MediaInfo(
+                            return await self._build_media_info(
+                                files=files,
+                                final_type=final_type,
                                 title=pin_data.title,
-                                duration=pin_data.duration,
                                 uploader=pin_data.uploader,
-                                is_playlist=False,
-                                playlist_count=0,
-                                platform=Platform.PINTEREST,
                                 url=pin_data.url,
-                                media_type=MediaType(final_type),
-                                file_path=files[0],
-                                file_paths=files,
-                                file_size=sum(f.stat().st_size for f in files),
-                                thumbnail_path=thumb_path
+                                platform=Platform.PINTEREST,
+                                duration=pin_data.duration,
                             )
                 except Exception as pe:
                     logger.error(f"Pinterest fallback download failed: {pe}")
@@ -657,18 +651,14 @@ class DownloaderService:
                     if ig_data and not ig_data.error_message and ig_data.items:
                         files, final_type = await instagram_service.download_media(ig_data, self.download_dir)
                         if files:
-                            return MediaInfo(
+                            return await self._build_media_info(
+                                files=files,
+                                final_type=final_type,
                                 title=ig_data.title,
-                                duration=ig_data.duration,
                                 uploader=ig_data.uploader,
-                                is_playlist=False,
-                                playlist_count=0,
-                                platform=Platform.INSTAGRAM,
                                 url=url,
-                                media_type=MediaType(final_type),
-                                file_path=files[0],
-                                file_paths=files,
-                                file_size=sum(f.stat().st_size for f in files)
+                                platform=Platform.INSTAGRAM,
+                                duration=ig_data.duration,
                             )
                 except Exception as ie:
                     logger.error(f"Instagram fallback download failed: {ie}")
@@ -680,19 +670,15 @@ class DownloaderService:
                     if tk_data and tk_data.image_urls:
                         files, audio_path, final_type = await tiktok_service.download_media(tk_data, self.download_dir)
                         if files:
-                            return MediaInfo(
+                            return await self._build_media_info(
+                                files=files,
+                                final_type=final_type,
                                 title=tk_data.title,
-                                duration=tk_data.duration,
                                 uploader=tk_data.uploader,
-                                is_playlist=False,
-                                playlist_count=0,
-                                platform=Platform.TIKTOK,
                                 url=tk_data.url,
-                                media_type=MediaType(final_type),
-                                file_path=files[0],
-                                file_paths=files,
-                                file_size=sum(f.stat().st_size for f in files),
-                                audio_path=audio_path
+                                platform=Platform.TIKTOK,
+                                duration=tk_data.duration,
+                                audio_path=audio_path,
                             )
                 except Exception as te:
                     logger.error(f"TikTok fallback download failed: {te}")

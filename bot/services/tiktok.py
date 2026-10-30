@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import aiohttp
 
+from bot.services.gallery_dl_utils import run_gallery_dl_json
 from bot.services.http_client import http_client
 from bot.services.image_utils import sanitize_image
 
@@ -69,49 +70,40 @@ class TikTokService:
 
     async def _extract_via_gallery_dl(self, url: str) -> TikTokData | None:
         """Extract TikTok photo slideshow using gallery-dl."""
-        import json
-        import subprocess
-
-        def _run():
-            try:
-                res = subprocess.run(["gallery-dl", "-j", url], capture_output=True, text=True, timeout=25)
-                if res.returncode != 0:
-                    return None
-                entries = json.loads(res.stdout)
-                title = "TikTok Photo"
-                uploader = "TikTok User"
-                item_id = ""
-                images: list[str] = []
-                music_url = None
-                for item in entries:
-                    code = item[0]
-                    if code == 2 and isinstance(item[1], dict):
-                        d = item[1]
-                        title = d.get("desc") or d.get("description") or title
-                        author = d.get("author", {}) if isinstance(d.get("author"), dict) else {}
-                        uploader = author.get("nickname") or author.get("unique_id") or uploader
-                        item_id = str(d.get("id") or d.get("aweme_id") or "")
-                    elif code == 3 and isinstance(item[1], str):
-                        u = item[1]
-                        if ".mp3" in u or "audio" in u or "mime_type=audio" in u:
-                            music_url = u
-                        else:
-                            images.append(u)
-                if images:
-                    return TikTokData(
-                        url=url,
-                        item_id=item_id,
-                        title=title,
-                        uploader=uploader,
-                        is_photo=True,
-                        image_urls=images,
-                        music_url=music_url
-                    )
-            except Exception as e:
-                logger.warning(f"gallery-dl extraction error for TikTok {url}: {e}")
+        res = await run_gallery_dl_json(url, use_cookies=False, timeout_seconds=25)
+        if not res.media_urls:
             return None
 
-        return await asyncio.to_thread(_run)
+        title = "TikTok Photo"
+        uploader = "TikTok User"
+        item_id = ""
+        images: list[str] = []
+        music_url = None
+
+        if res.metadata:
+            d = res.metadata
+            title = d.get("desc") or d.get("description") or title
+            author = d.get("author", {}) if isinstance(d.get("author"), dict) else {}
+            uploader = author.get("nickname") or author.get("unique_id") or uploader
+            item_id = str(d.get("id") or d.get("aweme_id") or "")
+
+        for u in res.media_urls:
+            if ".mp3" in u or "audio" in u or "mime_type=audio" in u:
+                music_url = u
+            else:
+                images.append(u)
+
+        if images:
+            return TikTokData(
+                url=url,
+                item_id=item_id,
+                title=title,
+                uploader=uploader,
+                is_photo=True,
+                image_urls=images,
+                music_url=music_url
+            )
+        return None
 
     async def extract_data(self, url: str) -> TikTokData | None:
         """
@@ -255,31 +247,20 @@ class TikTokService:
 
         # 2. Parallel photo slideshow download
         if data.is_photo and data.image_urls:
-            download_tasks = []
-            file_paths = []
-            for idx, img_url in enumerate(data.image_urls, 1):
-                f_path = download_dir / f"{task_id}_slide_{idx}.jpg"
-                file_paths.append(f_path)
-                download_tasks.append(http_client.download_file(img_url, f_path, headers=self.headers))
-
-            candidate_audio = None
-            if data.music_url:
-                candidate_audio = download_dir / f"{task_id}_music.mp3"
-                download_tasks.append(http_client.download_file(data.music_url, candidate_audio, headers=self.headers))
-
-            results = await asyncio.gather(*download_tasks, return_exceptions=True)
-
-            if candidate_audio:
-                img_results = results[:-1]
-                music_res = results[-1]
-            else:
-                img_results = results
-                music_res = False
-
-            downloaded_images = [
-                fp for fp, res in zip(file_paths, img_results)
-                if res is True and fp.exists() and fp.stat().st_size > 0
+            batch_tasks = [
+                (img_url, download_dir / f"{task_id}_slide_{idx}.jpg")
+                for idx, img_url in enumerate(data.image_urls, 1)
             ]
+            candidate_audio: Path | None = None
+            if data.music_url:
+                target_audio = download_dir / f"{task_id}_music.mp3"
+                img_coro = http_client.download_files_batch(batch_tasks, headers=self.headers)
+                audio_coro = http_client.download_file(data.music_url, target_audio, headers=self.headers)
+                downloaded_images, audio_ok = await asyncio.gather(img_coro, audio_coro)
+                if audio_ok:
+                    candidate_audio = target_audio
+            else:
+                downloaded_images = await http_client.download_files_batch(batch_tasks, headers=self.headers)
 
             # Validate and repair downloaded images concurrently
             sanitize_tasks = [sanitize_image(fp) for fp in downloaded_images]
@@ -295,7 +276,7 @@ class TikTokService:
 
             audio_path = (
                 candidate_audio
-                if (music_res is True and candidate_audio and candidate_audio.exists() and candidate_audio.stat().st_size > 0)
+                if (candidate_audio and candidate_audio.exists() and candidate_audio.stat().st_size > 0)
                 else None
             )
 
