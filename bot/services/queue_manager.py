@@ -68,6 +68,8 @@ class QueueManager:
             try:
                 await asyncio.sleep(interval_seconds)
                 await self.cleanup_old_files()
+                from bot.services.cache_service import cache_service
+                await cache_service.cleanup_old(days=60)
             except asyncio.CancelledError:
                 break
             except Exception as e:

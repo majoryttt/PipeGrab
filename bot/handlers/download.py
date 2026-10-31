@@ -35,6 +35,7 @@ from bot.keyboards.inline import (
     get_download_format_kb,
     get_playlist_kb,
 )
+from bot.services.cache_service import cache_service
 from bot.services.downloader import (
     DownloadProgress,
     MediaInfo,
@@ -664,6 +665,70 @@ async def handle_playlist_callback(callback: CallbackQuery):
     )
 
 
+async def _cache_delivered_media(
+    url: str,
+    media: MediaInfo,
+    sent_msg: types.Message | None,
+    caption: str,
+    audio_only: bool = False,
+) -> None:
+    if not sent_msg:
+        return
+    file_id = None
+    file_unique_id = None
+    m_type = "video"
+    if audio_only or media.media_type == MediaType.AUDIO:
+        m_type = "audio"
+        if sent_msg.audio:
+            file_id = sent_msg.audio.file_id
+            file_unique_id = sent_msg.audio.file_unique_id
+    elif media.media_type == MediaType.PHOTO and sent_msg.photo:
+        m_type = "photo"
+        file_id = sent_msg.photo[-1].file_id
+        file_unique_id = sent_msg.photo[-1].file_unique_id
+    elif media.media_type == MediaType.ANIMATION and sent_msg.animation:
+        m_type = "video"
+        file_id = sent_msg.animation.file_id
+        file_unique_id = sent_msg.animation.file_unique_id
+    elif sent_msg.video:
+        m_type = "video"
+        file_id = sent_msg.video.file_id
+        file_unique_id = sent_msg.video.file_unique_id
+
+    if file_id:
+        p_val = media.platform.value if hasattr(media.platform, "value") else str(media.platform)
+        try:
+            await cache_service.save_cached(
+                url=url,
+                file_id=file_id,
+                platform=p_val,
+                media_type=m_type,
+                title=media.title,
+                file_unique_id=file_unique_id,
+                file_size=media.file_size,
+                duration=media.duration,
+                width=media.width,
+                height=media.height,
+                caption=caption,
+            )
+            if media.url and media.url != url:
+                await cache_service.save_cached(
+                    url=media.url,
+                    file_id=file_id,
+                    platform=p_val,
+                    media_type=m_type,
+                    title=media.title,
+                    file_unique_id=file_unique_id,
+                    file_size=media.file_size,
+                    duration=media.duration,
+                    width=media.width,
+                    height=media.height,
+                    caption=caption,
+                )
+        except Exception as e:
+            logger.debug(f"Failed to cache delivered media: {e}")
+
+
 async def run_download_task(
     chat_id: int,
     user_id: int,
@@ -693,6 +758,63 @@ async def run_download_task(
         action_task = asyncio.create_task(_action_loop())
 
         async with queue_manager.acquire(user_id):
+            # Fast-path check: is media already in cache?
+            target_type = "audio" if audio_only else "video"
+            cached = await cache_service.get_cached(url, media_type=target_type)
+            if not cached and not audio_only:
+                cached = await cache_service.get_cached(url, media_type="photo")
+            if cached and cached.file_id:
+                try:
+                    c_cap = cached.caption or build_safe_caption(
+                        title=cached.title,
+                        url=url,
+                        platform_name=cached.platform,
+                        prefix="🎵" if target_type == "audio" else "🎬"
+                    )
+                    if cached.media_type == "audio":
+                        await bot.send_audio(
+                            chat_id=chat_id,
+                            audio=cached.file_id,
+                            title=truncate_text(cached.title, 100),
+                            duration=cached.duration,
+                            caption=c_cap,
+                            parse_mode="HTML"
+                        )
+                    elif cached.media_type == "photo":
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=cached.file_id,
+                            caption=c_cap,
+                            parse_mode="HTML"
+                        )
+                    else:
+                        await bot.send_video(
+                            chat_id=chat_id,
+                            video=cached.file_id,
+                            duration=cached.duration,
+                            width=cached.width,
+                            height=cached.height,
+                            caption=c_cap,
+                            parse_mode="HTML",
+                            supports_streaming=True
+                        )
+
+                    cleanup_ids: list[int | None] = [status_msg.message_id]
+                    if settings.delete_source_message and original_message_id:
+                        cleanup_ids.append(original_message_id)
+                    cleanup_messages_in_background(bot, chat_id, cleanup_ids)
+
+                    await stats_service.record_download(
+                        user_id=user_id,
+                        platform=cached.platform,
+                        media_type=cached.media_type,
+                        file_size=cached.file_size,
+                        status="success"
+                    )
+                    return
+                except Exception as cache_err:
+                    logger.debug(f"Cached delivery failed ({cache_err}), falling back to direct download")
+
             start_time = time.time()
             last_edit_time = 0.0
 
@@ -796,6 +918,7 @@ async def run_download_task(
                     prefix="🎬"
                 )
 
+                sent_msg: types.Message | None = None
                 try:
                     if media.media_type == MediaType.PHOTO:
                         photo_prefix = "📸" if platform_title == "Instagram" else "📌"
@@ -806,7 +929,7 @@ async def run_download_task(
                             uploader=media.uploader,
                             prefix=photo_prefix
                         )
-                        await bot.send_photo(
+                        sent_msg = await bot.send_photo(
                             chat_id=chat_id,
                             photo=FSInputFile(str(media.file_path)),
                             caption=p_caption,
@@ -819,7 +942,7 @@ async def run_download_task(
                             platform_name=platform_title,
                             prefix="📌"
                         )
-                        await bot.send_animation(
+                        sent_msg = await bot.send_animation(
                             chat_id=chat_id,
                             animation=FSInputFile(str(media.file_path)),
                             caption=p_caption,
@@ -842,7 +965,7 @@ async def run_download_task(
                             platform_name=platform_title,
                             prefix="🎵"
                         )
-                        await bot.send_audio(
+                        sent_msg = await bot.send_audio(
                             chat_id=chat_id,
                             audio=FSInputFile(str(media.file_path)),
                             title=truncate_text(media.title, 100),
@@ -853,7 +976,7 @@ async def run_download_task(
                         )
                     else:  # VIDEO
                         thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
-                        await bot.send_video(
+                        sent_msg = await bot.send_video(
                             chat_id=chat_id,
                             video=FSInputFile(str(media.file_path)),
                             duration=media.duration,
@@ -868,9 +991,9 @@ async def run_download_task(
                     logger.warning(f"TelegramBadRequest sending HTML media ({tb_err}), retrying with plain text")
                     plain_caption = f"{truncate_text(media.title, 900)}\n{url}"
                     if media.media_type == MediaType.PHOTO:
-                        await bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_caption)
+                        sent_msg = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_caption)
                     elif media.media_type == MediaType.ANIMATION:
-                        await bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(media.file_path)), caption=plain_caption)
+                        sent_msg = await bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(media.file_path)), caption=plain_caption)
                     elif media.media_type == MediaType.ALBUM:
                         valid_files = [f for f in media.file_paths if f.exists()]
                         await send_media_album_robust(
@@ -882,7 +1005,7 @@ async def run_download_task(
                             platform_name=platform_title,
                         )
                     elif audio_only or media.media_type == MediaType.AUDIO:
-                        await bot.send_audio(
+                        sent_msg = await bot.send_audio(
                             chat_id=chat_id,
                             audio=FSInputFile(str(media.file_path)),
                             title=truncate_text(media.title, 100),
@@ -892,7 +1015,7 @@ async def run_download_task(
                         )
                     else:
                         thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
-                        await bot.send_video(
+                        sent_msg = await bot.send_video(
                             chat_id=chat_id,
                             video=FSInputFile(str(media.file_path)),
                             duration=media.duration,
@@ -902,6 +1025,15 @@ async def run_download_task(
                             caption=plain_caption,
                             supports_streaming=True
                         )
+
+                if sent_msg:
+                    await _cache_delivered_media(
+                        url=url,
+                        media=media,
+                        sent_msg=sent_msg,
+                        caption=caption,
+                        audio_only=audio_only
+                    )
 
                 # If there's an accompanying audio track (e.g. TikTok slideshow music)
                 if media.audio_path and media.audio_path.exists():

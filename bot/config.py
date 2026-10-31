@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     cookies_file: Path = Path("data/cookies/cookies.txt")
     downloads_dir: Path = Path("downloads")
     stats_db_path: Path = Path("data/stats.db")
+    cache_db_path: Path = Path("data/cache.db")
+    dump_channel_id: int | str | None = None
+    inline_cache_time: int = 300
     delete_source_message: bool = True
 
     @property
@@ -36,4 +39,5 @@ settings = Settings()
 settings.downloads_dir.mkdir(parents=True, exist_ok=True)
 settings.cookies_file.parent.mkdir(parents=True, exist_ok=True)
 settings.stats_db_path.parent.mkdir(parents=True, exist_ok=True)
+settings.cache_db_path.parent.mkdir(parents=True, exist_ok=True)
 

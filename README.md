@@ -48,6 +48,11 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
   - Easily convert any video, animation, or link to a native round Telegram Video Note.
   - Reply with `/circle` (or aliases `/round`, `/krug`) to any video or send `/circle <url>`.
   - Automatically center-crops to 1:1 (640x640), up to 60 seconds with crisp AAC audio.
+- **Inline Mode (`@bot_username <url>`)**:
+  - Share videos and MP3s directly inside any dialog or group chat without forwarding!
+  - Instant delivery from persistent SQLite cache (`data/cache.db`) for previously downloaded links.
+  - Two-stage background rendering for new links with smooth replacement of status placeholder with native video (`editMessageMedia`).
+  - Supports YouTube (video & MP3), TikTok, Reels, Pinterest, and VK.
 - **Overload Protection**: Task queue, concurrent download semaphore, and a limit of 1 active download task per user.
 - **Automatic Cleanup**: Downloaded temporary files are reliably deleted after sending. A background cleaner prevents Local Bot API binlog buildup.
 
@@ -178,3 +183,30 @@ Instagram restricts viewing Stories without authentication. Cookies also help pr
 
 **Alternative method:**
 Place `cookies.txt` manually on your server at `data/cookies/cookies.txt`.
+
+---
+
+## ⚡ Setting Up Inline Mode (`@bot_username <url>`)
+
+Inline mode allows sending videos and MP3 tracks directly inside any dialog or group by typing `@your_bot_username <link>`.
+
+### 1. Enable in @BotFather
+1. Open a chat with [@BotFather](https://t.me/BotFather).
+2. Send `/setinline`.
+3. Choose your bot and set a placeholder text (e.g. `Paste video URL...`).
+4. Send `/setinlinefeedback`, select your bot, and enable it (**Enabled - 100%**) — this allows Telegram to send `inline_message_id` so the bot can replace the placeholder with the finished media.
+
+### 2. Configure Dump Channel for Direct Delivery (Optional)
+In Telegram Bot API, the `editMessageMedia` method for inline messages requires a `file_id`.
+- **With `DUMP_CHANNEL_ID` set**: The bot downloads the video, uploads it to your private storage channel (to obtain the Telegram `file_id`), and replaces the "Downloading..." placeholder with the native video right inside the conversation!
+- **Without `DUMP_CHANNEL_ID`**: The bot operates in safe cache mode (cached videos sent instantly; uncached links display an interactive card with a deep-link button to open the bot).
+
+**How to set up the Dump Channel:**
+1. Create a private Telegram channel (e.g., `PipeGrab Dump`).
+2. Add your bot to the channel as an **Administrator** with *Post Messages* permission.
+3. Obtain the channel ID (usually starts with `-100...`).
+4. Set it in `.env`:
+   ```env
+   DUMP_CHANNEL_ID=-1001234567890
+   ```
+5. Restart the bot.

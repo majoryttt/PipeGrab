@@ -12,6 +12,7 @@ from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefaul
 from bot.config import settings
 from bot.handlers.base import router as base_router
 from bot.handlers.download import router as download_router
+from bot.handlers.inline import router as inline_router
 from bot.services.cookie_utils import ensure_cookies_file_normalized
 from bot.services.http_client import http_client
 from bot.services.path_wrapper import LocalFilesPathWrapper
@@ -83,6 +84,7 @@ async def main():
     # Register routers
     dp.include_router(base_router)
     dp.include_router(download_router)
+    dp.include_router(inline_router)
 
     # Normalize cookies if present
     if settings.has_cookies:
