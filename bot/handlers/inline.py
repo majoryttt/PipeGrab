@@ -123,6 +123,7 @@ async def handle_inline_query(inline_query: InlineQuery, bot: Bot):
             "• 📸 Instagram (Reels и публикации)\n"
             "• 📌 Pinterest (видео и фото)\n"
             "• 🐦 Twitter / X\n"
+            "• 🤖 Reddit (видео и галереи)\n"
             "• 🎥 VK Video"
         )
         help_results: list[InlineQueryResultUnion] = [
@@ -146,7 +147,7 @@ async def handle_inline_query(inline_query: InlineQuery, bot: Bot):
             InlineQueryResultArticle(
                 id="inline_no_url",
                 title="⚠️ Ссылка не найдена",
-                description="Вставьте ссылку на YouTube, TikTok, Instagram, Pinterest или VK",
+                description="Вставьте ссылку на YouTube, TikTok, Instagram, Pinterest, Reddit или VK",
                 input_message_content=InputTextMessageContent(
                     message_text="❌ <b>В запросе не найдена ссылка.</b>\nВведите: <code>@bot_username ссылка</code>",
                     parse_mode="HTML"
@@ -410,13 +411,19 @@ async def process_inline_download(
             if cached.media_type == "audio":
                 media_input = InputMediaAudio(media=cached.file_id, caption=cached.caption, parse_mode="HTML")
             elif cached.media_type == "photo":
-                media_input = InputMediaPhoto(media=cached.file_id, caption=cached.caption, parse_mode="HTML")
+                media_input = InputMediaPhoto(
+                    media=cached.file_id,
+                    caption=cached.caption,
+                    parse_mode="HTML",
+                    has_spoiler=getattr(cached, "has_spoiler", False),
+                )
             else:
                 media_input = InputMediaVideo(
                     media=cached.file_id,
                     caption=cached.caption,
                     parse_mode="HTML",
-                    supports_streaming=True
+                    supports_streaming=True,
+                    has_spoiler=getattr(cached, "has_spoiler", False),
                 )
             await bot.edit_message_media(inline_message_id=inline_message_id, media=media_input)
             return
@@ -446,11 +453,17 @@ async def process_inline_download(
             )
 
             if not media or not has_files:
-                err_msg = media.error_message if (media and media.error_message) else "Не удалось скачать файл"
+                if media and media.error_message == "NO_MEDIA_REDDIT":
+                    err_msg_text = "ℹ️ <b>В посте Reddit нет медиафайла</b> (текстовая запись или внешняя ссылка)."
+                elif media and media.error_message == "AUTH_REQUIRED":
+                    err_msg_text = "❌ <b>Требуется авторизация для доступа к этому медиа.</b>"
+                else:
+                    raw_err = media.error_message if (media and media.error_message) else "Не удалось скачать файл"
+                    err_msg_text = f"❌ <b>Ошибка при загрузке:</b> {html.escape(raw_err)}"
                 try:
                     await bot.edit_message_text(
                         inline_message_id=inline_message_id,
-                        text=f"❌ <b>Ошибка при загрузке:</b> {html.escape(err_msg)}",
+                        text=err_msg_text,
                         parse_mode="HTML"
                     )
                 except TelegramAPIError as e:
@@ -505,12 +518,18 @@ async def process_inline_download(
                     chat_id=dump_channel_id,
                     photo=FSInputFile(str(media.file_path)),
                     caption=caption,
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    has_spoiler=media.has_spoiler,
                 )
                 if dump_msg.photo:
                     file_id = dump_msg.photo[-1].file_id
                     file_unique_id = dump_msg.photo[-1].file_unique_id
-                    edit_media = InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML")
+                    edit_media = InputMediaPhoto(
+                        media=file_id,
+                        caption=caption,
+                        parse_mode="HTML",
+                        has_spoiler=media.has_spoiler,
+                    )
             elif media.media_type == MediaType.ALBUM:
                 first_file = next((f for f in media.file_paths if f.exists()), media.file_path)
                 if not first_file or not first_file.exists():
@@ -524,7 +543,8 @@ async def process_inline_download(
                         height=media.height,
                         caption=caption,
                         parse_mode="HTML",
-                        supports_streaming=True
+                        supports_streaming=True,
+                        has_spoiler=media.has_spoiler,
                     )
                     if dump_msg.video:
                         file_id = dump_msg.video.file_id
@@ -533,19 +553,26 @@ async def process_inline_download(
                             media=file_id,
                             caption=caption,
                             parse_mode="HTML",
-                            supports_streaming=True
+                            supports_streaming=True,
+                            has_spoiler=media.has_spoiler,
                         )
                 else:
                     dump_msg = await bot.send_photo(
                         chat_id=dump_channel_id,
                         photo=FSInputFile(str(first_file)),
                         caption=caption,
-                        parse_mode="HTML"
+                        parse_mode="HTML",
+                        has_spoiler=media.has_spoiler,
                     )
                     if dump_msg.photo:
                         file_id = dump_msg.photo[-1].file_id
                         file_unique_id = dump_msg.photo[-1].file_unique_id
-                        edit_media = InputMediaPhoto(media=file_id, caption=caption, parse_mode="HTML")
+                        edit_media = InputMediaPhoto(
+                            media=file_id,
+                            caption=caption,
+                            parse_mode="HTML",
+                            has_spoiler=media.has_spoiler,
+                        )
             else:  # VIDEO
                 thumb_file = FSInputFile(str(media.thumbnail_path)) if media.thumbnail_path and media.thumbnail_path.exists() else None
                 dump_msg = await bot.send_video(
@@ -557,7 +584,8 @@ async def process_inline_download(
                     thumbnail=thumb_file,
                     caption=caption,
                     parse_mode="HTML",
-                    supports_streaming=True
+                    supports_streaming=True,
+                    has_spoiler=media.has_spoiler,
                 )
                 if dump_msg.video:
                     file_id = dump_msg.video.file_id
@@ -566,7 +594,8 @@ async def process_inline_download(
                         media=file_id,
                         caption=caption,
                         parse_mode="HTML",
-                        supports_streaming=True
+                        supports_streaming=True,
+                        has_spoiler=media.has_spoiler,
                     )
 
             if not file_id or not edit_media:
@@ -592,7 +621,8 @@ async def process_inline_download(
                 duration=media.duration,
                 width=media.width,
                 height=media.height,
-                caption=caption
+                caption=caption,
+                has_spoiler=media.has_spoiler,
             )
             # Dual cache canonical URL if different from query URL
             if media.url and media.url != url:
@@ -607,7 +637,8 @@ async def process_inline_download(
                     duration=media.duration,
                     width=media.width,
                     height=media.height,
-                    caption=caption
+                    caption=caption,
+                    has_spoiler=media.has_spoiler,
                 )
 
             # Update the inline message in the recipient chat

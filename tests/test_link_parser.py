@@ -1,5 +1,6 @@
 import pytest
-from bot.services.downloader import extract_first_url, detect_platform, Platform
+
+from bot.services.downloader import Platform, detect_platform, extract_first_url
 
 
 @pytest.mark.parametrize("text,expected_url", [
@@ -29,6 +30,12 @@ def test_extract_first_url(text, expected_url):
     ("https://ru.pinterest.com/pin/1113444707905303804/", Platform.PINTEREST),
     ("https://pin.it/7xYz123", Platform.PINTEREST),
     ("https://pin.it/5hYq47KDQ", Platform.PINTEREST),
+    ("https://www.reddit.com/r/funny/comments/12345/funny_video/", Platform.REDDIT),
+    ("https://redd.it/12345", Platform.REDDIT),
+    ("https://v.redd.it/12345", Platform.REDDIT),
+    ("https://i.redd.it/12345.jpg", Platform.REDDIT),
+    ("https://www.reddit.com/r/gifs/s/abc1234", Platform.REDDIT),
+    ("https://www.reddit.com/gallery/12345", Platform.REDDIT),
     ("https://example.com/random/video.mp4", Platform.UNKNOWN),
 ])
 def test_detect_platform(url, expected_platform):

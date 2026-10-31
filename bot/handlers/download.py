@@ -162,6 +162,8 @@ async def send_media_album_robust(
     title: str,
     url: str,
     platform_name: str,
+    uploader: str | None = None,
+    has_spoiler: bool = False,
 ) -> bool:
     """
     Robust sender for media groups (albums).
@@ -169,7 +171,7 @@ async def send_media_album_robust(
     - Splitting into chunks of 10 items.
     - Caption formatting (HTML -> plain text fallback).
     - IMAGE_PROCESS_FAILED or 'failed to send message #<N>' by identifying the bad
-      item, sending it as a Document, and retrying the rest of the album as photos.
+    - item, sending it as a Document, and retrying the rest of the album as photos.
     - Fallback to InputMediaDocument if photo processing fails for the whole group.
     """
     if bot is None:
@@ -179,11 +181,12 @@ async def send_media_album_robust(
     chunks = [valid_files[i:i + 10] for i in range(0, len(valid_files), 10)]
     for chunk_idx, chunk in enumerate(chunks):
         files_in_chunk = list(chunk)
-        album_prefix = "📸" if platform_name == "Instagram" else "📌"
+        album_prefix = "📸" if platform_name in ["Instagram", "Reddit"] else ("📌" if platform_name == "Pinterest" else "🎬")
         chunk_caption = (
             build_safe_caption(
                 title=title,
                 url=url,
+                uploader=uploader,
                 platform_name=platform_name,
                 prefix=album_prefix,
                 extra=f"({len(valid_files)} медиа)"
@@ -201,9 +204,21 @@ async def send_media_album_robust(
             if len(current_files) == 1:
                 fpath = current_files[0]
                 if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
-                    await bot.send_video(chat_id=chat_id, video=FSInputFile(str(fpath)), caption=caption_text, parse_mode=parse_mode)
+                    await bot.send_video(
+                        chat_id=chat_id,
+                        video=FSInputFile(str(fpath)),
+                        caption=caption_text,
+                        parse_mode=parse_mode,
+                        has_spoiler=has_spoiler,
+                    )
                 else:
-                    await bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(fpath)), caption=caption_text, parse_mode=parse_mode)
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=FSInputFile(str(fpath)),
+                        caption=caption_text,
+                        parse_mode=parse_mode,
+                        has_spoiler=has_spoiler,
+                    )
                 return True
 
             group: list[MediaGroupItem] = []
@@ -211,9 +226,9 @@ async def send_media_album_robust(
                 c = caption_text if idx == 0 else None
                 pm = parse_mode if idx == 0 else None
                 if fpath.suffix.lower() in [".mp4", ".mov", ".mkv"]:
-                    group.append(InputMediaVideo(media=FSInputFile(str(fpath)), caption=c, parse_mode=pm))
+                    group.append(InputMediaVideo(media=FSInputFile(str(fpath)), caption=c, parse_mode=pm, has_spoiler=has_spoiler))
                 else:
-                    group.append(InputMediaPhoto(media=FSInputFile(str(fpath)), caption=c, parse_mode=pm))
+                    group.append(InputMediaPhoto(media=FSInputFile(str(fpath)), caption=c, parse_mode=pm, has_spoiler=has_spoiler))
 
             try:
                 await bot.send_media_group(chat_id=chat_id, media=group)
@@ -511,6 +526,12 @@ async def handle_text_message(message: types.Message):
                 "Скачивание возможно только если в бот загружены cookies аккаунта, подписанного на этот профиль."
             )
             return
+        elif info.error_message == "NO_MEDIA_REDDIT":
+            await update_status_safely(
+                status_msg,
+                "ℹ️ <b>В посте Reddit нет медиафайла</b> (текстовая запись или внешняя ссылка)."
+            )
+            return
 
     if not info:
         await update_status_safely(
@@ -710,6 +731,7 @@ async def _cache_delivered_media(
                 width=media.width,
                 height=media.height,
                 caption=caption,
+                has_spoiler=media.has_spoiler,
             )
             if media.url and media.url != url:
                 await cache_service.save_cached(
@@ -724,6 +746,7 @@ async def _cache_delivered_media(
                     width=media.width,
                     height=media.height,
                     caption=caption,
+                    has_spoiler=media.has_spoiler,
                 )
         except Exception as e:
             logger.debug(f"Failed to cache delivered media: {e}")
@@ -785,7 +808,8 @@ async def run_download_task(
                             chat_id=chat_id,
                             photo=cached.file_id,
                             caption=c_cap,
-                            parse_mode="HTML"
+                            parse_mode="HTML",
+                            has_spoiler=getattr(cached, "has_spoiler", False),
                         )
                     else:
                         await bot.send_video(
@@ -796,7 +820,8 @@ async def run_download_task(
                             height=cached.height,
                             caption=c_cap,
                             parse_mode="HTML",
-                            supports_streaming=True
+                            supports_streaming=True,
+                            has_spoiler=getattr(cached, "has_spoiler", False),
                         )
 
                     cleanup_ids: list[int | None] = [status_msg.message_id]
@@ -870,6 +895,11 @@ async def run_download_task(
                             "Для доступа к историям администратор бота должен загрузить файл cookies."
                         )
                     await update_status_safely(status_msg, auth_err_msg)
+                elif media.error_message == "NO_MEDIA_REDDIT":
+                    await update_status_safely(
+                        status_msg,
+                        "ℹ️ <b>В посте Reddit нет медиафайла</b> (текстовая запись или внешняя ссылка)."
+                    )
                 else:
                     await update_status_safely(status_msg, "❌ <b>Требуется авторизация для доступа к этому медиа.</b>")
                 return
@@ -921,7 +951,7 @@ async def run_download_task(
                 sent_msg: types.Message | None = None
                 try:
                     if media.media_type == MediaType.PHOTO:
-                        photo_prefix = "📸" if platform_title == "Instagram" else "📌"
+                        photo_prefix = "📸" if platform_title in ["Instagram", "Reddit"] else "📌"
                         p_caption = build_safe_caption(
                             title=media.title,
                             url=url,
@@ -933,20 +963,24 @@ async def run_download_task(
                             chat_id=chat_id,
                             photo=FSInputFile(str(media.file_path)),
                             caption=p_caption,
-                            parse_mode="HTML"
+                            parse_mode="HTML",
+                            has_spoiler=media.has_spoiler,
                         )
                     elif media.media_type == MediaType.ANIMATION:
+                        anim_prefix = "👾" if platform_title == "Reddit" else "📌"
                         p_caption = build_safe_caption(
                             title=media.title,
                             url=url,
+                            uploader=media.uploader,
                             platform_name=platform_title,
-                            prefix="📌"
+                            prefix=anim_prefix,
                         )
                         sent_msg = await bot.send_animation(
                             chat_id=chat_id,
                             animation=FSInputFile(str(media.file_path)),
                             caption=p_caption,
-                            parse_mode="HTML"
+                            parse_mode="HTML",
+                            has_spoiler=media.has_spoiler,
                         )
                     elif media.media_type == MediaType.ALBUM:
                         valid_files = [f for f in media.file_paths if f.exists()]
@@ -957,6 +991,8 @@ async def run_download_task(
                             title=media.title,
                             url=url,
                             platform_name=platform_title,
+                            uploader=media.uploader,
+                            has_spoiler=media.has_spoiler,
                         )
                     elif audio_only or media.media_type == MediaType.AUDIO:
                         a_caption = build_safe_caption(
@@ -985,15 +1021,26 @@ async def run_download_task(
                             thumbnail=thumb_file,
                             caption=caption,
                             parse_mode="HTML",
-                            supports_streaming=True
+                            supports_streaming=True,
+                            has_spoiler=media.has_spoiler,
                         )
                 except TelegramBadRequest as tb_err:
                     logger.warning(f"TelegramBadRequest sending HTML media ({tb_err}), retrying with plain text")
                     plain_caption = f"{truncate_text(media.title, 900)}\n{url}"
                     if media.media_type == MediaType.PHOTO:
-                        sent_msg = await bot.send_photo(chat_id=chat_id, photo=FSInputFile(str(media.file_path)), caption=plain_caption)
+                        sent_msg = await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=FSInputFile(str(media.file_path)),
+                            caption=plain_caption,
+                            has_spoiler=media.has_spoiler,
+                        )
                     elif media.media_type == MediaType.ANIMATION:
-                        sent_msg = await bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(media.file_path)), caption=plain_caption)
+                        sent_msg = await bot.send_animation(
+                            chat_id=chat_id,
+                            animation=FSInputFile(str(media.file_path)),
+                            caption=plain_caption,
+                            has_spoiler=media.has_spoiler,
+                        )
                     elif media.media_type == MediaType.ALBUM:
                         valid_files = [f for f in media.file_paths if f.exists()]
                         await send_media_album_robust(
@@ -1003,6 +1050,8 @@ async def run_download_task(
                             title=media.title,
                             url=url,
                             platform_name=platform_title,
+                            uploader=media.uploader,
+                            has_spoiler=media.has_spoiler,
                         )
                     elif audio_only or media.media_type == MediaType.AUDIO:
                         sent_msg = await bot.send_audio(
@@ -1023,7 +1072,8 @@ async def run_download_task(
                             height=media.height,
                             thumbnail=thumb_file,
                             caption=plain_caption,
-                            supports_streaming=True
+                            supports_streaming=True,
+                            has_spoiler=media.has_spoiler,
                         )
 
                 if sent_msg:

@@ -61,14 +61,12 @@ async def set_bot_commands(bot: Bot):
         BotCommand(command="start", description="Главное меню"),
         BotCommand(command="help", description="Справка и возможности"),
         BotCommand(command="circle", description="Превратить видео в кружок"),
-        BotCommand(command="cookies", description="Статус и настройка Cookies"),
-        BotCommand(command="status", description="Состояние сервера и лимиты"),
     ]
     try:
         await bot.set_my_commands(commands, scope=BotCommandScopeDefault())
         if settings.admin_id:
             admin_commands = commands + [
-                BotCommand(command="stats", description="Панель статистики и аналитики")
+                BotCommand(command="admin", description="Панель управления (сервер, статистика, cookies)")
             ]
             await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=settings.admin_id))
         logger.info("Bot commands registered successfully.")

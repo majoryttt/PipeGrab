@@ -54,6 +54,7 @@ async def test_cache_service_crud(tmp_path: Path):
         width=720,
         height=1280,
         caption="🎬 <b>Funny Cat Video</b>",
+        has_spoiler=True,
     )
 
     # Query with slightly different tracking URL
@@ -64,6 +65,7 @@ async def test_cache_service_crud(tmp_path: Path):
     assert cached.title == "Funny Cat Video"
     assert cached.media_type == "video"
     assert cached.file_size == 1048576
+    assert cached.has_spoiler is True
 
     # Test saving audio for the same URL
     await service.save_cached(

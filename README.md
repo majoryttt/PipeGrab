@@ -60,13 +60,17 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
 
 ## 📋 Bot Commands
 
+### For All Users
 | Command | Description |
 | :--- | :--- |
-| `/start` | Welcome message and list of supported services |
-| `/help` | Detailed guide on how to use the bot |
+| `/start` | Welcome message and quick start with inline buttons |
+| `/help` | Detailed guide and supported formats |
 | `/circle` | Convert replied video or link into a Telegram Video Note (circle) |
-| `/cookies` | Status of active cookies and detected authentications |
-| `/status` | System status (API mode, file limits, free disk space, active downloads) |
+
+### For Administrator (`ADMIN_ID`)
+| Command | Description |
+| :--- | :--- |
+| `/admin` | Unified interactive control panel: download stats, server health, and cookies |
 
 ---
 
@@ -179,7 +183,7 @@ Instagram restricts viewing Stories without authentication. Cookies also help pr
 3. Export cookies in **Netscape** format (saving as `cookies.txt`).
 4. **Simply drag and drop or send the `cookies.txt` file directly to the bot in Telegram as a document!**
    - The bot validates the file, saves it, and enables access to Stories immediately without restarting.
-   - You can check the cookie status at any time with `/cookies`.
+   - You can check the cookie status at any time in the `/admin` panel or with `/cookies`.
 
 **Alternative method:**
 Place `cookies.txt` manually on your server at `data/cookies/cookies.txt`.

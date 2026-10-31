@@ -9,7 +9,11 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command, CommandStart
 
 from bot.config import settings
-from bot.keyboards.inline import get_stats_keyboard
+from bot.keyboards.inline import (
+    get_admin_keyboard,
+    get_start_keyboard,
+    get_stats_keyboard,
+)
 from bot.services.cookie_utils import (
     parse_cookie_services,
     validate_netscape_cookies,
@@ -22,57 +26,41 @@ logger = logging.getLogger(__name__)
 router = Router(name="base_router")
 
 
-@router.message(CommandStart())
-async def cmd_start(message: types.Message):
-    welcome_text = (
-        "👋 <b>Привет! Я PipeGrab — бот для скачивания медиа с популярных платформ.</b>\n\n"
-        "<b>Поддерживаемые сервисы:</b>\n"
-        "• 🎬 <b>YouTube</b> — видео, Shorts, аудио (MP3) и плейлисты\n"
-        "• 🎵 <b>TikTok</b> — видео без водяных знаков\n"
-        "• 📸 <b>Instagram</b> — Reels, видео, публикации, а также <b>истории</b> (через cookies)\n"
-        "• 📌 <b>Pinterest</b> — фото в оригинальном качестве, GIF, альбомы (карусели) и видео\n"
-        "• 🐦 <b>Twitter / X</b> — видео и клипы\n\n"
-        "🚀 <b>Как пользоваться:</b>\n"
-        "• Отправьте мне ссылку в диалоге для скачивания.\n"
-        "• Или используйте <b>инлайн-режим</b> в любом чате: <code>@имя_бота &lt;ссылка&gt;</code>.\n\n"
-        "🍪 <b>Авторизация и Cookies (/cookies):</b>\n"
-        "Истории Instagram и защита от проверок доступны при подключении cookies."
-    )
-    await message.answer(welcome_text, parse_mode="HTML")
-
-
-@router.message(Command("help"))
-async def cmd_help(message: types.Message):
-    is_admin = bool(settings.admin_id and message.from_user and message.from_user.id == settings.admin_id)
-    cookies_line = (
-        "5️⃣ <b>Авторизация и Cookies:</b> отправьте команду /cookies для инструкции по добавлению файла <code>cookies.txt</code> (для историй Instagram).\n"
-        if is_admin else
-        "5️⃣ <b>Авторизация и Cookies:</b> отправьте команду /cookies для проверки статуса авторизации Instagram / YouTube.\n"
-    )
-    help_text = (
-        "📖 <b>Справка по использованию:</b>\n\n"
-        "1️⃣ <b>Отправка ссылки:</b> скопируйте ссылку из приложения или браузера и отправьте боту.\n"
-        "2️⃣ <b>Pinterest:</b> бот автоматически определяет тип контента (фото, альбом, GIF-анимация или видео) и скачивает в максимальном качестве.\n"
-        "3️⃣ <b>YouTube:</b> бот предложит скачать видео в MP4 или аудиодорожку в MP3.\n"
-        "4️⃣ <b>Плейлисты и доски:</b> бот предложит выбрать количество элементов для загрузки.\n"
-        f"{cookies_line}"
+def get_help_text(is_admin: bool = False) -> str:
+    admin_line = "\n/admin — Панель управления (сервер, статистика, cookies)" if is_admin else ""
+    return (
+        "📖 <b>Справка по использованию PipeGrab:</b>\n\n"
+        "1️⃣ <b>Отправка ссылки:</b> скопируйте ссылку на видео или публикацию и отправьте боту.\n"
+        "2️⃣ <b>YouTube:</b> бот предложит скачать видео в MP4 или аудиодорожку в MP3.\n"
+        "3️⃣ <b>TikTok:</b> видео скачиваются без водяных знаков, а фото-посты — аккуратным альбомом с прикрепленной музыкой.\n"
+        "4️⃣ <b>Instagram:</b> Reels, видео, публикации и карусели фото (истории доступны при наличии cookies у бота).\n"
+        "5️⃣ <b>Pinterest:</b> оригинальные фотографии, видео со звуком, анимированные GIF и карусели.\n"
         "6️⃣ <b>Кружки (Video Notes):</b> ответьте командой /circle на любое видео или отправьте <code>/circle &lt;ссылка&gt;</code>.\n"
-        "7️⃣ <b>Инлайн-режим:</b> наберите <code>@имя_бота &lt;ссылка&gt;</code> прямо в диалоге или группе, чтобы отправить видео собеседнику.\n\n"
+        "7️⃣ <b>Инлайн-режим:</b> наберите <code>@имя_бота &lt;ссылка&gt;</code> прямо в любом диалоге или группе, чтобы отправить медиа собеседнику.\n\n"
         "<b>Команды бота:</b>\n"
         "/start — Главное меню\n"
         "/help — Справка и возможности\n"
-        "/circle — Превратить видео или ссылку в Telegram-кружок\n"
-        "/cookies — Статус и настройка авторизации Instagram / YouTube\n"
-        "/status — Состояние сервера и лимиты"
-        + ("\n/stats — Статистика загрузок и аналитика" if is_admin else "")
+        "/circle — Создать Telegram-кружок из видео или ссылки"
+        f"{admin_line}"
     )
-    await message.answer(help_text, parse_mode="HTML")
 
 
-@router.message(Command("cookies"))
-async def cmd_cookies(message: types.Message):
-    is_admin = bool(settings.admin_id and message.from_user and message.from_user.id == settings.admin_id)
+def get_server_status_text() -> str:
+    total, _used, free = shutil.disk_usage(settings.downloads_dir)
+    api_mode = "Локальный (до 2 ГБ)" if settings.local_bot_api_url else "Стандартный Bot API (до 50 МБ)"
+    cookies_status = "Подключены ✅" if settings.has_cookies else "Отсутствуют ⚠️ (истории Instagram недоступны)"
 
+    return (
+        "🖥 <b>Состояние сервера и системы:</b>\n\n"
+        f"• <b>Режим Bot API:</b> {api_mode}\n"
+        f"• <b>Cookies:</b> {cookies_status}\n"
+        f"• <b>Активных загрузок в очереди:</b> {len(queue_manager._active_users)}\n"
+        f"• <b>Свободно места на диске:</b> {free // (1024 * 1024 * 1024)} ГБ / {total // (1024 * 1024 * 1024)} ГБ\n"
+        f"• <b>Лимит размера файла:</b> {settings.max_file_size_mb} МБ\n"
+    )
+
+
+def get_cookies_status_text(is_admin: bool = True) -> str:
     if settings.has_cookies:
         stat = settings.cookies_file.stat()
         file_size_kb = stat.st_size / 1024
@@ -88,11 +76,11 @@ async def cmd_cookies(message: types.Message):
         services_str = "\n".join(f"• {s}" for s in services) if services else "• Общие cookies"
 
         update_hint = (
-            "\n\n<i>Чтобы обновить куки, просто отправьте новый файл <code>cookies.txt</code> в этот чат.</i>"
+            "\n\n<i>Чтобы обновить куки, просто отправьте новый файл <code>cookies.txt</code> в этот чат как документ.</i>"
             if is_admin else ""
         )
 
-        text = (
+        return (
             "🍪 <b>Статус Cookies:</b>\n\n"
             "✅ <b>Файл cookies подключен и активен!</b>\n"
             f"📁 <b>Путь:</b> <code>{settings.cookies_file}</code>\n"
@@ -103,7 +91,7 @@ async def cmd_cookies(message: types.Message):
         )
     else:
         if is_admin:
-            text = (
+            return (
                 "🍪 <b>Статус Cookies:</b>\n\n"
                 "⚠️ <b>Файл cookies не найден или пуст.</b>\n"
                 f"📁 Ожидается: <code>{settings.cookies_file}</code>\n\n"
@@ -119,13 +107,66 @@ async def cmd_cookies(message: types.Message):
                 "Бот автоматически проверит и установит файл."
             )
         else:
-            text = (
+            return (
                 "🍪 <b>Статус Cookies:</b>\n\n"
                 "⚠️ <b>Файл cookies не подключен.</b>\n\n"
                 "Для скачивания историй Instagram и обхода ограничений требуются cookies.\n"
                 "Настройка и загрузка cookies доступны только администратору бота."
             )
+
+
+async def get_admin_content(tab: str = "stats", period: str = "day") -> str:
+    if tab == "server":
+        return get_server_status_text()
+    elif tab == "cookies":
+        return get_cookies_status_text(is_admin=True)
+    else:
+        summary = await stats_service.get_stats(period)
+        return stats_service.format_stats_message(summary)
+
+
+@router.message(CommandStart())
+async def cmd_start(message: types.Message):
+    welcome_text = (
+        "👋 <b>Привет! Я PipeGrab — бот для быстрого скачивания медиа.</b>\n\n"
+        "Отправьте мне ссылку, и я мгновенно пришлю видео, аудио или фото в оригинальном качестве.\n\n"
+        "<b>Поддерживаемые платформы:</b>\n"
+        "• 🎬 <b>YouTube</b> — видео, Shorts, плейлисты и MP3\n"
+        "• 🎵 <b>TikTok</b> — видео без водяных знаков и фото-альбомы с музыкой\n"
+        "• 📸 <b>Instagram</b> — Reels, посты, карусели и истории\n"
+        "• 📌 <b>Pinterest</b> — фото в исходном качестве, альбомы, GIF и видео\n"
+        "• 🐦 <b>Twitter / X</b> | 🤖 <b>Reddit</b> | 🌐 <b>VK</b>\n\n"
+        "💡 <i>Отправьте ссылку прямо в чат или используйте инлайн-режим:</i> <code>@имя_бота &lt;ссылка&gt;</code>"
+    )
+    await message.answer(welcome_text, reply_markup=get_start_keyboard(), parse_mode="HTML")
+
+
+@router.message(Command("help"))
+async def cmd_help(message: types.Message):
+    is_admin = bool(settings.admin_id and message.from_user and message.from_user.id == settings.admin_id)
+    text = get_help_text(is_admin=is_admin)
     await message.answer(text, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "help_info")
+async def handle_help_callback(callback: types.CallbackQuery):
+    is_admin = bool(settings.admin_id and callback.from_user and callback.from_user.id == settings.admin_id)
+    text = get_help_text(is_admin=is_admin)
+    if isinstance(callback.message, types.Message):
+        await callback.message.answer(text, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.message(Command("cookies"))
+async def cmd_cookies(message: types.Message):
+    user_id = message.from_user.id if message.from_user else 0
+    is_admin = bool(settings.admin_id and user_id == settings.admin_id)
+    text = get_cookies_status_text(is_admin=is_admin)
+    if is_admin:
+        kb = get_admin_keyboard(active_tab="cookies", active_period="day")
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+    else:
+        await message.answer(text, parse_mode="HTML")
 
 
 async def download_telegram_document(bot: Bot, doc: types.Document, destination: Path) -> Path:
@@ -241,25 +282,32 @@ async def handle_document_upload(message: types.Message):
             temp_path.unlink(missing_ok=True)
 
 
+@router.message(Command("admin"))
+async def cmd_admin(message: types.Message):
+    user_id = message.from_user.id if message.from_user else 0
+    if not settings.admin_id or user_id != settings.admin_id:
+        await message.answer("⛔ У вас нет доступа к этой команде.")
+        return
+
+    text = await get_admin_content(tab="stats", period="day")
+    kb = get_admin_keyboard(active_tab="stats", active_period="day")
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
 @router.message(Command("status"))
 async def cmd_status(message: types.Message):
-    total, _used, free = shutil.disk_usage(settings.downloads_dir)
-    api_mode = "Локальный (до 2 ГБ)" if settings.local_bot_api_url else "Стандартный Bot API (до 50 МБ)"
-
-    if settings.has_cookies:
-        cookies_status = "Подключены ✅"
+    user_id = message.from_user.id if message.from_user else 0
+    is_admin = bool(settings.admin_id and user_id == settings.admin_id)
+    if is_admin:
+        text = get_server_status_text()
+        kb = get_admin_keyboard(active_tab="server", active_period="day")
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
     else:
-        cookies_status = "Отсутствуют ⚠️ (истории Instagram недоступны)"
-
-    status_text = (
-        "📊 <b>Статус бота:</b>\n\n"
-        f"• <b>Режим Bot API:</b> {api_mode}\n"
-        f"• <b>Cookies:</b> {cookies_status}\n"
-        f"• <b>Активных загрузок:</b> {len(queue_manager._active_users)}\n"
-        f"• <b>Свободно места на диске:</b> {free // (1024 * 1024 * 1024)} ГБ / {total // (1024 * 1024 * 1024)} ГБ\n"
-        f"• <b>Лимит размера файла:</b> {settings.max_file_size_mb} МБ\n"
-    )
-    await message.answer(status_text, parse_mode="HTML")
+        text = (
+            "🟢 <b>PipeGrab работает в штатном режиме!</b>\n\n"
+            "Просто отправьте мне ссылку для скачивания или используйте инлайн-режим: <code>@имя_бота &lt;ссылка&gt;</code>."
+        )
+        await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("stats"))
@@ -307,6 +355,52 @@ async def handle_stats_callback(callback: types.CallbackQuery):
                 await callback.answer("Статистика актуальна ✅")
             else:
                 logger.warning(f"Failed to edit stats message: {e}")
+                await callback.answer()
+    else:
+        await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:"))
+async def handle_admin_callback(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    if not settings.admin_id or user_id != settings.admin_id:
+        await callback.answer("⛔ У вас нет доступа к этой команде.", show_alert=True)
+        return
+
+    data = callback.data or ""
+    parts = data.split(":")
+    action = parts[1] if len(parts) > 1 else "tab"
+
+    tab = "stats"
+    period = "day"
+
+    if action == "tab":
+        tab = parts[2] if len(parts) > 2 else "stats"
+        period = parts[3] if len(parts) > 3 else "day"
+    elif action == "stats":
+        tab = "stats"
+        period = parts[2] if len(parts) > 2 else "day"
+    elif action == "refresh":
+        tab = parts[2] if len(parts) > 2 else "stats"
+        period = parts[3] if len(parts) > 3 else "day"
+
+    if period not in ("day", "week", "month", "all"):
+        period = "day"
+    if tab not in ("stats", "server", "cookies"):
+        tab = "stats"
+
+    text = await get_admin_content(tab=tab, period=period)
+    kb = get_admin_keyboard(active_tab=tab, active_period=period)
+
+    if isinstance(callback.message, types.Message):
+        try:
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+            await callback.answer("Данные обновлены 🔄" if action == "refresh" else None)
+        except TelegramBadRequest as e:
+            if "message is not modified" in str(e).lower():
+                await callback.answer("Данные актуальны ✅")
+            else:
+                logger.warning(f"Failed to edit admin message: {e}")
                 await callback.answer()
     else:
         await callback.answer()

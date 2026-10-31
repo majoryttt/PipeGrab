@@ -19,6 +19,7 @@ from bot.services.instagram import (
     instagram_service,
 )
 from bot.services.pinterest import is_pinterest_url, pinterest_service
+from bot.services.reddit import RedditData, is_reddit_url, reddit_service
 from bot.services.tiktok import resolve_tiktok_url, tiktok_service
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ class Platform(str, Enum):
     INSTAGRAM = "Instagram"
     TWITTER = "Twitter/X"
     PINTEREST = "Pinterest"
+    REDDIT = "Reddit"
     UNKNOWN = "Unknown"
 
 
@@ -65,6 +67,12 @@ PLATFORM_PATTERNS = {
         r'(?:https?://)?(?:www\.|[a-z]{2}\.)?pinterest\.[a-z.]+/[^/\s]+/[^/\s]+',
         r'(?:https?://)?pin\.it/'
     ],
+    Platform.REDDIT: [
+        r'(?:https?://)?(?:www\.|old\.|new\.)?reddit\.com/(?:r/[^/\s]+/comments/|gallery/|r/[^/\s]+/s/|comments/)?',
+        r'(?:https?://)?(?:www\.)?redd\.it/',
+        r'(?:https?://)?(?:www\.)?v\.redd\.it/',
+        r'(?:https?://)?(?:www\.)?i\.redd\.it/',
+    ],
 }
 
 
@@ -86,6 +94,8 @@ def detect_platform(url: str) -> Platform:
                 return platform
     if is_pinterest_url(url):
         return Platform.PINTEREST
+    if is_reddit_url(url):
+        return Platform.REDDIT
     return Platform.UNKNOWN
 
 
@@ -117,6 +127,7 @@ class MediaInfo:
     file_size: int = 0
     error_message: str | None = None
     audio_path: Path | None = None
+    has_spoiler: bool = False
 
 
 class DownloaderService:
@@ -133,6 +144,7 @@ class DownloaderService:
         platform: Platform,
         duration: int = 0,
         audio_path: Path | None = None,
+        has_spoiler: bool = False,
     ) -> MediaInfo | None:
         """Construct MediaInfo object with thumbnail and total file size for downloaded files."""
         if not files or not files[0].exists():
@@ -158,6 +170,7 @@ class DownloaderService:
             file_size=total_size,
             thumbnail_path=thumb_path,
             audio_path=audio_path,
+            has_spoiler=has_spoiler,
         )
 
     def _get_base_ydl_opts(self, platform: Platform | None = None, use_cookies: bool = True) -> dict[str, Any]:
@@ -284,7 +297,56 @@ class DownloaderService:
                 error_message="AUTH_REQUIRED_INSTAGRAM_STORY"
             )
 
-        # 5. Generic yt-dlp extraction
+        # 5. Specialized Reddit handler (photos, galleries, videos, RedGifs, and text posts)
+        if platform == Platform.REDDIT:
+            try:
+                reddit_data = await reddit_service.extract_data(url)
+                if reddit_data:
+                    if reddit_data.error_message:
+                        return MediaInfo(
+                            title=reddit_data.title,
+                            duration=0,
+                            uploader=reddit_data.uploader,
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.REDDIT,
+                            url=url,
+                            error_message=reddit_data.error_message,
+                            has_spoiler=reddit_data.over_18 or reddit_data.is_spoiler,
+                        )
+
+                    uploader_str = f"r/{reddit_data.subreddit} • u/{reddit_data.uploader}" if reddit_data.subreddit else reddit_data.uploader
+                    has_spoiler = reddit_data.over_18 or reddit_data.is_spoiler
+
+                    if reddit_data.items and not reddit_data.is_video and not reddit_data.external_url:
+                        media_type = MediaType.ALBUM if len(reddit_data.items) > 1 else MediaType(reddit_data.media_type)
+                        return MediaInfo(
+                            title=reddit_data.title,
+                            duration=0,
+                            uploader=uploader_str,
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.REDDIT,
+                            url=reddit_data.url,
+                            media_type=media_type,
+                            has_spoiler=has_spoiler,
+                        )
+                    elif reddit_data.is_video or reddit_data.external_url:
+                        return MediaInfo(
+                            title=reddit_data.title,
+                            duration=0,
+                            uploader=uploader_str,
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.REDDIT,
+                            url=reddit_data.url,
+                            media_type=MediaType.VIDEO,
+                            has_spoiler=has_spoiler,
+                        )
+            except Exception as re:
+                logger.warning(f"Reddit extractor failed for {url}, falling back to yt-dlp: {re}")
+
+        # 6. Generic yt-dlp extraction
         def _extract(use_cookies: bool = True):
             ydl_opts = self._get_base_ydl_opts(platform=platform, use_cookies=use_cookies)
             ydl_opts["extract_flat"] = "in_playlist"
@@ -305,6 +367,7 @@ class DownloaderService:
             title = info.get("title") or "Unknown Title"
             duration = int(info.get("duration") or 0)
             uploader = info.get("uploader") or info.get("channel") or "Unknown"
+            age_limit = int(info.get("age_limit") or 0)
 
             return MediaInfo(
                 title=title,
@@ -314,7 +377,8 @@ class DownloaderService:
                 playlist_count=playlist_count,
                 platform=platform,
                 url=url,
-                media_type=MediaType.VIDEO
+                media_type=MediaType.VIDEO,
+                has_spoiler=(age_limit >= 18),
             )
         except Exception as e:
             err_str = str(e).lower()
@@ -455,7 +519,54 @@ class DownloaderService:
             except Exception as ie:
                 logger.warning(f"Instagram direct download failed for {url}: {ie}")
 
-        # 4. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, and Pinterest videos)
+        # 4. Specialized Reddit handler
+        reddit_has_spoiler = False
+        reddit_uploader_override: str | None = None
+        target_download_url = url
+        reddit_data: RedditData | None = None
+        if platform == Platform.REDDIT:
+            try:
+                reddit_data = await reddit_service.extract_data(url)
+                if reddit_data:
+                    if reddit_data.error_message:
+                        return MediaInfo(
+                            title=reddit_data.title,
+                            duration=0,
+                            uploader=reddit_data.uploader,
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.REDDIT,
+                            url=url,
+                            error_message=reddit_data.error_message,
+                            has_spoiler=reddit_data.over_18 or reddit_data.is_spoiler,
+                        )
+
+                    reddit_has_spoiler = reddit_data.over_18 or reddit_data.is_spoiler
+                    reddit_uploader_override = (
+                        f"r/{reddit_data.subreddit} • u/{reddit_data.uploader}"
+                        if reddit_data.subreddit else reddit_data.uploader
+                    )
+
+                    if reddit_data.items and not reddit_data.is_video and not audio_only and not reddit_data.external_url:
+                        files, final_type = await reddit_service.download_media(reddit_data, self.download_dir)
+                        if files:
+                            return await self._build_media_info(
+                                files=files,
+                                final_type=final_type,
+                                title=reddit_data.title,
+                                uploader=reddit_uploader_override,
+                                url=reddit_data.url,
+                                platform=Platform.REDDIT,
+                                duration=0,
+                                has_spoiler=reddit_has_spoiler,
+                            )
+
+                    if reddit_data.external_url:
+                        target_download_url = reddit_data.external_url
+            except Exception as re:
+                logger.warning(f"Reddit direct download failed for {url}: {re}")
+
+        # 5. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, Pinterest, and Reddit videos)
         task_id = str(uuid.uuid4())[:8]
         out_template = str(self.download_dir / f"{task_id}_%(title).100B.%(ext)s")
 
@@ -521,7 +632,7 @@ class DownloaderService:
         def _download(use_cookies: bool = True):
             opts = _build_ydl_opts(use_cookies)
             with yt_dlp.YoutubeDL(opts) as ydl:
-                return ydl.extract_info(url, download=True)
+                return ydl.extract_info(target_download_url, download=True)
 
         try:
             info = await asyncio.to_thread(_download, settings.has_cookies)
@@ -580,11 +691,13 @@ class DownloaderService:
                         height = meta["height"]
 
             media_type = MediaType.AUDIO if audio_only else MediaType.VIDEO
+            final_has_spoiler = reddit_has_spoiler or (int(info.get("age_limit") or 0) >= 18)
+            final_uploader = reddit_uploader_override or uploader
 
             return MediaInfo(
                 title=title,
                 duration=duration,
-                uploader=uploader,
+                uploader=final_uploader,
                 is_playlist=False,
                 playlist_count=0,
                 platform=platform,
@@ -595,7 +708,8 @@ class DownloaderService:
                 thumbnail_path=thumb_path,
                 width=width,
                 height=height,
-                file_size=file_size
+                file_size=file_size,
+                has_spoiler=final_has_spoiler,
             )
         except Exception as e:
             err_str = str(e).lower()
@@ -665,6 +779,29 @@ class DownloaderService:
                             )
                 except Exception as te:
                     logger.error(f"TikTok fallback download failed: {te}")
+
+            # Fallback for Reddit if yt-dlp failed
+            if platform == Platform.REDDIT and not audio_only:
+                try:
+                    if reddit_data and reddit_data.items:
+                        files, final_type = await reddit_service.download_media(reddit_data, self.download_dir)
+                        if files:
+                            uploader_str = (
+                                f"r/{reddit_data.subreddit} • u/{reddit_data.uploader}"
+                                if reddit_data.subreddit else reddit_data.uploader
+                            )
+                            return await self._build_media_info(
+                                files=files,
+                                final_type=final_type,
+                                title=reddit_data.title,
+                                uploader=uploader_str,
+                                url=reddit_data.url,
+                                platform=Platform.REDDIT,
+                                duration=0,
+                                has_spoiler=reddit_has_spoiler,
+                            )
+                except Exception as re:
+                    logger.error(f"Reddit fallback download failed: {re}")
 
             error_msg = None
             if any(term in err_str for term in [

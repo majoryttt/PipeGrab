@@ -1,6 +1,14 @@
+import os
+import sys
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_bin_dir = str(Path(sys.executable).parent)
+_cur_path = os.environ.get("PATH", "")
+_parts = _cur_path.split(os.pathsep) if _cur_path else []
+if _bin_dir not in _parts:
+    os.environ["PATH"] = os.pathsep.join([_bin_dir, *_parts]) if _parts else _bin_dir
 
 
 class Settings(BaseSettings):

@@ -7,8 +7,13 @@ from aiogram import types
 from aiogram.exceptions import TelegramBadRequest
 
 from bot.config import settings
-from bot.handlers.base import cmd_stats, handle_stats_callback
-from bot.keyboards.inline import get_stats_keyboard
+from bot.handlers.base import (
+    cmd_admin,
+    cmd_stats,
+    handle_admin_callback,
+    handle_stats_callback,
+)
+from bot.keyboards.inline import get_admin_keyboard, get_stats_keyboard
 from bot.services.stats_service import StatsService, format_size_ru
 
 
@@ -201,3 +206,85 @@ async def test_handle_stats_callback():
     with patch.object(settings, "admin_id", 12345):
         await handle_stats_callback(cb_admin_refresh)
         cb_admin_refresh.answer.assert_called_once_with("Статистика актуальна ✅")
+
+
+def test_get_admin_keyboard():
+    kb_stats = get_admin_keyboard("stats", "week")
+    buttons = [btn for row in kb_stats.inline_keyboard for btn in row]
+    callbacks = [btn.callback_data for btn in buttons]
+    assert "admin:tab:stats:week" in callbacks
+    assert "admin:tab:server:week" in callbacks
+    assert "admin:tab:cookies:week" in callbacks
+    assert "admin:stats:week" in callbacks
+    assert "admin:refresh:stats:week" in callbacks
+
+    kb_server = get_admin_keyboard("server", "day")
+    server_buttons = [btn for row in kb_server.inline_keyboard for btn in row]
+    server_callbacks = [btn.callback_data for btn in server_buttons]
+    assert "admin:tab:server:day" in server_callbacks
+    assert "admin:refresh:server:day" in server_callbacks
+
+
+@pytest.mark.asyncio
+async def test_cmd_admin_access_control():
+    # Non-admin user
+    msg_user = MagicMock(spec=types.Message)
+    msg_user.from_user = MagicMock(id=999)
+    msg_user.answer = AsyncMock()
+
+    with patch.object(settings, "admin_id", 12345):
+        await cmd_admin(msg_user)
+        msg_user.answer.assert_called_once_with("⛔ У вас нет доступа к этой команде.")
+
+    # Admin user
+    msg_admin = MagicMock(spec=types.Message)
+    msg_admin.from_user = MagicMock(id=12345)
+    msg_admin.answer = AsyncMock()
+
+    with patch.object(settings, "admin_id", 12345):
+        await cmd_admin(msg_admin)
+        msg_admin.answer.assert_called_once()
+        args, kwargs = msg_admin.answer.call_args
+        assert "Панель статистики администратора" in args[0]
+        assert "reply_markup" in kwargs
+
+
+@pytest.mark.asyncio
+async def test_handle_admin_callback():
+    # Non-admin callback
+    cb_user = MagicMock(spec=types.CallbackQuery)
+    cb_user.from_user = MagicMock(id=999)
+    cb_user.data = "admin:tab:server:day"
+    cb_user.answer = AsyncMock()
+
+    with patch.object(settings, "admin_id", 12345):
+        await handle_admin_callback(cb_user)
+        cb_user.answer.assert_called_once_with("⛔ У вас нет доступа к этой команде.", show_alert=True)
+
+    # Admin switch to server tab
+    msg = MagicMock(spec=types.Message)
+    msg.edit_text = AsyncMock()
+
+    cb_admin = MagicMock(spec=types.CallbackQuery)
+    cb_admin.from_user = MagicMock(id=12345)
+    cb_admin.data = "admin:tab:server:day"
+    cb_admin.message = msg
+    cb_admin.answer = AsyncMock()
+
+    with patch.object(settings, "admin_id", 12345):
+        await handle_admin_callback(cb_admin)
+        msg.edit_text.assert_called_once()
+        args, _kwargs = msg.edit_text.call_args
+        assert "Состояние сервера" in args[0]
+
+    # Admin switch to cookies tab
+    cb_cookies = MagicMock(spec=types.CallbackQuery)
+    cb_cookies.from_user = MagicMock(id=12345)
+    cb_cookies.data = "admin:tab:cookies:day"
+    cb_cookies.message = msg
+    cb_cookies.answer = AsyncMock()
+
+    with patch.object(settings, "admin_id", 12345):
+        await handle_admin_callback(cb_cookies)
+        args, _kwargs = msg.edit_text.call_args
+        assert "Статус Cookies" in args[0]

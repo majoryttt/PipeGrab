@@ -94,6 +94,7 @@ class CachedMedia:
     width: int
     height: int
     caption: str | None
+    has_spoiler: bool = False
     created_at: str | None = None
 
 
@@ -103,7 +104,7 @@ class CacheService:
         self._init_db()
 
     def _init_db(self) -> None:
-        """Initialize SQLite cache table and indexes."""
+        """Initialize SQLite cache table, migration, and indexes."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.db_path, timeout=5.0) as conn:
             cursor = conn.cursor()
@@ -123,10 +124,17 @@ class CacheService:
                     width INTEGER NOT NULL DEFAULT 0,
                     height INTEGER NOT NULL DEFAULT 0,
                     caption TEXT,
+                    has_spoiler INTEGER NOT NULL DEFAULT 0,
                     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (url_hash, media_type)
                 );
             """)
+            # Migration check: add has_spoiler column if missing
+            cursor.execute("PRAGMA table_info(media_cache);")
+            columns = [col[1] for col in cursor.fetchall()]
+            if "has_spoiler" not in columns:
+                cursor.execute("ALTER TABLE media_cache ADD COLUMN has_spoiler INTEGER NOT NULL DEFAULT 0;")
+
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_cache_created_at ON media_cache(created_at);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_cache_url ON media_cache(url);")
             conn.commit()
@@ -143,7 +151,7 @@ class CacheService:
                     cursor.execute(
                         """
                         SELECT url_hash, url, file_id, file_unique_id, platform, media_type,
-                               title, file_size, duration, width, height, caption, created_at
+                               title, file_size, duration, width, height, caption, has_spoiler, created_at
                         FROM media_cache
                         WHERE url_hash = ? AND media_type = ?
                         LIMIT 1
@@ -154,7 +162,7 @@ class CacheService:
                     cursor.execute(
                         """
                         SELECT url_hash, url, file_id, file_unique_id, platform, media_type,
-                               title, file_size, duration, width, height, caption, created_at
+                               title, file_size, duration, width, height, caption, has_spoiler, created_at
                         FROM media_cache
                         WHERE url_hash = ?
                         ORDER BY CASE WHEN media_type = 'video' THEN 1 ELSE 2 END
@@ -177,7 +185,8 @@ class CacheService:
                         width=row[9],
                         height=row[10],
                         caption=row[11],
-                        created_at=row[12],
+                        has_spoiler=bool(row[12]),
+                        created_at=row[13],
                     )
                 return None
 
@@ -200,6 +209,7 @@ class CacheService:
         width: int = 0,
         height: int = 0,
         caption: str | None = None,
+        has_spoiler: bool = False,
     ) -> None:
         """Store or update media cache entry."""
         u_hash = hash_url(url)
@@ -213,9 +223,9 @@ class CacheService:
                     """
                     INSERT OR REPLACE INTO media_cache (
                         url_hash, media_type, url, file_id, file_unique_id, platform,
-                        title, file_size, duration, width, height, caption, created_at
+                        title, file_size, duration, width, height, caption, has_spoiler, created_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                     (
                         u_hash,
@@ -230,6 +240,7 @@ class CacheService:
                         width,
                         height,
                         caption,
+                        1 if has_spoiler else 0,
                     ),
                 )
                 conn.commit()

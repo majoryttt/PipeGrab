@@ -111,3 +111,61 @@ def get_stats_keyboard(active_period: str = "day") -> InlineKeyboardMarkup:
     refresh_btn = InlineKeyboardButton(text="🔄 Обновить", callback_data=f"stats:refresh:{active_period}")
     return InlineKeyboardMarkup(inline_keyboard=[row1, row2, [refresh_btn]])
 
+
+def get_start_keyboard() -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for the /start welcome message.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📖 Справка и возможности", callback_data="help_info"),
+                InlineKeyboardButton(text="🔎 Инлайн-поиск", switch_inline_query_current_chat=""),
+            ]
+        ]
+    )
+
+
+def get_admin_keyboard(active_tab: str = "stats", active_period: str = "day") -> InlineKeyboardMarkup:
+    """
+    Inline keyboard for the /admin unified panel:
+    - Tab row: [📊 Статистика] [🖥 Сервер] [🍪 Cookies]
+    - Period row (only if tab == 'stats'): [📅 День] [📆 Неделя] [🗓 Месяц] [♾ Всё время]
+    - Control row: [🔄 Обновить]
+    """
+    tabs = [
+        ("stats", "📊 Статистика"),
+        ("server", "🖥 Сервер"),
+        ("cookies", "🍪 Cookies"),
+    ]
+    tab_buttons: list[InlineKeyboardButton] = []
+    for tab_id, tab_label in tabs:
+        label = f"• {tab_label} •" if tab_id == active_tab else tab_label
+        tab_buttons.append(InlineKeyboardButton(text=label, callback_data=f"admin:tab:{tab_id}:{active_period}"))
+
+    rows: list[list[InlineKeyboardButton]] = [tab_buttons]
+
+    if active_tab == "stats":
+        periods = [
+            ("day", "📅 День"),
+            ("week", "📆 Неделя"),
+            ("month", "🗓 Месяц"),
+            ("all", "♾ Всё время"),
+        ]
+        period_row1: list[InlineKeyboardButton] = []
+        period_row2: list[InlineKeyboardButton] = []
+        for i, (p_code, p_label) in enumerate(periods):
+            label = f"• {p_label} •" if p_code == active_period else p_label
+            btn = InlineKeyboardButton(text=label, callback_data=f"admin:stats:{p_code}")
+            if i < 2:
+                period_row1.append(btn)
+            else:
+                period_row2.append(btn)
+        rows.append(period_row1)
+        rows.append(period_row2)
+
+    refresh_btn = InlineKeyboardButton(text="🔄 Обновить", callback_data=f"admin:refresh:{active_tab}:{active_period}")
+    rows.append([refresh_btn])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
