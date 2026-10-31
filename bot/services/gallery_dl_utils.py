@@ -17,6 +17,11 @@ AUTH_KEYWORDS = (
     "redirect to login",
     "checkpoint",
     "unreachable",
+    "blocked by network security",
+    "403: blocked",
+    "account authentication is required",
+    "http error 403",
+    "http 403",
 )
 
 
@@ -80,7 +85,8 @@ def run_gallery_dl_json_sync(
 
             if code == -1 and isinstance(payload, dict):
                 msg = payload.get("message", "").lower()
-                if any(k in msg for k in AUTH_KEYWORDS):
+                err = str(payload.get("error", "")).lower()
+                if any(k in msg for k in AUTH_KEYWORDS) or any(k in err for k in AUTH_KEYWORDS):
                     auth_required = True
             elif code == 2 and isinstance(payload, dict):
                 all_metadata.append(payload)

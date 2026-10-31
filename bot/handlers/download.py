@@ -504,6 +504,25 @@ async def handle_text_message(message: types.Message):
                 )
             await update_status_safely(status_msg, story_msg)
             return
+        elif info.error_message == "AUTH_REQUIRED_REDDIT":
+            if is_admin:
+                reddit_msg = (
+                    "🔒 <b>Для скачивания с Reddit требуется авторизация (cookies).</b>\n\n"
+                    "Reddit заблокировал анонимный запрос с сервера (защита от ботов / 403 Blocked).\n\n"
+                    "<b>Как решить проблему:</b>\n"
+                    "1️⃣ Откройте Reddit в браузере (на компьютере) под своим аккаунтом.\n"
+                    "2️⃣ Экспортируйте cookies с помощью расширения (например, <i>Get cookies.txt LOCALLY</i> или <i>Cookie-Editor</i> в формате Netscape).\n"
+                    "3️⃣ Отправьте полученный файл <code>cookies.txt</code> прямо в этот чат Telegram!\n\n"
+                    "<i>После загрузки cookies бот сможет скачивать посты и видео с Reddit.</i>"
+                )
+            else:
+                reddit_msg = (
+                    "🔒 <b>Для скачивания с Reddit требуется авторизация.</b>\n\n"
+                    "Reddit заблокировал доступ к контенту для сервера.\n"
+                    "Для включения доступа администратор бота должен загрузить файл cookies."
+                )
+            await update_status_safely(status_msg, reddit_msg)
+            return
         elif info.error_message == "AUTH_REQUIRED":
             if is_admin:
                 auth_msg = (
@@ -895,6 +914,24 @@ async def run_download_task(
                             "Для доступа к историям администратор бота должен загрузить файл cookies."
                         )
                     await update_status_safely(status_msg, auth_err_msg)
+                elif media.error_message == "AUTH_REQUIRED_REDDIT":
+                    is_admin = bool(settings.admin_id and user_id == settings.admin_id)
+                    if is_admin:
+                        reddit_err_msg = (
+                            "🔒 <b>Для скачивания с Reddit требуется авторизация (cookies).</b>\n\n"
+                            "Reddit заблокировал анонимный запрос с сервера (защита от ботов / 403 Blocked).\n\n"
+                            "<b>Как решить проблему:</b>\n"
+                            "1️⃣ Откройте Reddit в браузере под своим аккаунтом.\n"
+                            "2️⃣ Экспортируйте cookies в формате Netscape (<code>cookies.txt</code>).\n"
+                            "3️⃣ Отправьте файл <code>cookies.txt</code> прямо в этот чат Telegram!"
+                        )
+                    else:
+                        reddit_err_msg = (
+                            "🔒 <b>Для скачивания с Reddit требуется авторизация.</b>\n\n"
+                            "Reddit заблокировал доступ к контенту для сервера.\n"
+                            "Для доступа администратор бота должен загрузить файл cookies."
+                        )
+                    await update_status_safely(status_msg, reddit_err_msg)
                 elif media.error_message == "NO_MEDIA_REDDIT":
                     await update_status_safely(
                         status_msg,

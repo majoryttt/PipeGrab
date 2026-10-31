@@ -23,11 +23,13 @@ def test_valid_netscape_cookies():
         "# https://curl.haxx.se/docs/http-cookies.html\n"
         ".instagram.com\tTRUE\t/\tTRUE\t1750000000\tsessionid\t12345%3Aabcde\n"
         ".youtube.com\tTRUE\t/\tTRUE\t1750000000\tSID\tabc123xyz\n"
+        ".reddit.com\tTRUE\t/\tTRUE\t1750000000\treddit_session\trd123\n"
     )
     valid, services = validate_and_parse_cookies(sample_cookies)
     assert valid is True
     assert any("Instagram" in s for s in services)
     assert any("YouTube" in s for s in services)
+    assert any("Reddit" in s for s in services)
 
 
 def test_invalid_cookies():
@@ -63,3 +65,31 @@ def test_ensure_cookies_file_normalized(tmp_path):
     # Second run should not modify again
     modified_again = ensure_cookies_file_normalized(cookie_file)
     assert modified_again is False
+
+
+def test_parse_cookies_for_domain(tmp_path):
+    from bot.services.cookie_utils import parse_cookies_for_domain, get_cookies_for_domain
+    from bot.config import settings
+
+    raw = (
+        ".reddit.com\tTRUE\t/\tTRUE\t1800000000\treddit_session\tabc%3A123\n"
+        ".reddit.com\tTRUE\t/\tTRUE\t1800000000\tloid\txyz789\n"
+        ".instagram.com\tTRUE\t/\tTRUE\t1800000000\tsessionid\tig_secret\n"
+    )
+    reddit_cookies = parse_cookies_for_domain(raw, "reddit.com")
+    assert reddit_cookies == {"reddit_session": "abc%3A123", "loid": "xyz789"}
+
+    ig_cookies = parse_cookies_for_domain(raw, "instagram.com")
+    assert ig_cookies == {"sessionid": "ig_secret"}
+
+    empty = parse_cookies_for_domain(raw, "tiktok.com")
+    assert empty == {}
+
+    # Test get_cookies_for_domain with patched settings
+    c_file = tmp_path / "test_cookies.txt"
+    c_file.write_text(raw, encoding="utf-8")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(settings, "cookies_file", c_file)
+        result = get_cookies_for_domain("reddit.com")
+        assert result.get("reddit_session") == "abc%3A123"
+

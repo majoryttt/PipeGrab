@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import aiohttp
 
 from bot.config import settings
+from bot.services.cookie_utils import get_cookies_for_domain
 from bot.services.gallery_dl_utils import run_gallery_dl_json
 from bot.services.http_client import http_client
 
@@ -53,16 +54,68 @@ async def resolve_reddit_url(url: str, timeout_seconds: int = 10) -> str:
     if netloc != "redd.it" and "/s/" not in parsed.path:
         return url
 
+    cookies = get_cookies_for_domain("reddit.com") if settings.has_cookies else None
+
     try:
         session = await http_client.get_session()
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-        async with session.get(url, allow_redirects=True, timeout=timeout, headers=REDDIT_HEADERS) as resp:
-            final_url = str(resp.url)
-            logger.info(f"Resolved Reddit URL '{url}' -> '{final_url}'")
-            return final_url
+
+        # 1. First attempt: check 30x redirect header without downloading body
+        # (fast and prevents getting blocked by Cloudflare HTML / JS challenges)
+        async with session.get(
+            url,
+            allow_redirects=False,
+            timeout=timeout,
+            headers=REDDIT_HEADERS,
+            cookies=cookies,
+        ) as resp:
+            status = getattr(resp, "status", None)
+            if status in (301, 302, 303, 307, 308):
+                location = resp.headers.get("Location")
+                if location:
+                    if location.startswith("/"):
+                        location = f"https://www.reddit.com{location}"
+                    clean_url = location.split("?")[0]
+                    logger.info(f"Resolved Reddit redirect '{url}' -> '{clean_url}' (HTTP {status})")
+                    return clean_url
+            elif status == 403:
+                logger.warning(f"Reddit blocked redirect resolution for {url}: HTTP 403 Blocked")
+                return url
+            elif status == 200:
+                final_url = str(getattr(resp, "url", url)).split("?")[0]
+                if "/s/" not in final_url and final_url != url:
+                    logger.info(f"Resolved Reddit URL '{url}' -> '{final_url}'")
+                    return final_url
+            elif getattr(resp, "url", None) and str(resp.url) != url:
+                final_url = str(resp.url)
+                logger.info(f"Resolved Reddit URL '{url}' -> '{final_url}'")
+                return final_url
+
+        # 2. Fallback: follow redirects if no Location header was returned
+        async with session.get(
+            url,
+            allow_redirects=True,
+            timeout=timeout,
+            headers=REDDIT_HEADERS,
+            cookies=cookies,
+        ) as resp:
+            if getattr(resp, "status", None) == 200:
+                final_url = str(getattr(resp, "url", url)).split("?")[0]
+                if "/s/" not in final_url:
+                    logger.info(f"Resolved Reddit redirect via follow: '{url}' -> '{final_url}'")
+                    return final_url
+            elif getattr(resp, "status", None) == 403:
+                logger.warning(f"Reddit returned 403 Blocked following redirects for {url}")
+                return url
+            elif getattr(resp, "url", None) and str(resp.url) != url:
+                final_url = str(resp.url)
+                logger.info(f"Resolved Reddit URL '{url}' -> '{final_url}'")
+                return final_url
     except Exception as e:  # noqa: BLE001
         logger.warning(f"Failed to resolve Reddit redirect for {url}: {e}")
         return url
+
+    return url
 
 
 @dataclass
@@ -110,7 +163,7 @@ class RedditService:
                 uploader="Reddit",
                 subreddit="",
                 media_type="photo",
-                error_message="AUTH_REQUIRED",
+                error_message="AUTH_REQUIRED_REDDIT",
             )
 
         metadata: dict[str, Any] = result.metadata or {}

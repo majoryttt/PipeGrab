@@ -64,6 +64,61 @@ async def test_resolve_reddit_url_short():
 
 
 @pytest.mark.asyncio
+async def test_resolve_reddit_url_301_location():
+    share_url = "https://www.reddit.com/r/mybabessin/s/mEDaAAdHj4"
+    target_with_params = "https://www.reddit.com/r/mybabessin/comments/1ur3fmw/teens_love/?share_id=qVQKqn4goPHUw8v0nNhLq&utm_content=1"
+    clean_target = "https://www.reddit.com/r/mybabessin/comments/1ur3fmw/teens_love/"
+
+    mock_resp = MagicMock()
+    mock_resp.status = 301
+    mock_resp.headers = {"Location": target_with_params}
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.get.return_value = mock_cm
+
+    with patch("bot.services.reddit.http_client.get_session", AsyncMock(return_value=mock_session)):
+        resolved = await resolve_reddit_url(share_url)
+        assert resolved == clean_target
+
+
+@pytest.mark.asyncio
+async def test_resolve_reddit_url_403_blocked():
+    share_url = "https://www.reddit.com/r/sub/s/blocked123"
+
+    mock_resp = MagicMock()
+    mock_resp.status = 403
+
+    mock_cm = MagicMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_cm.__aexit__ = AsyncMock(return_value=None)
+
+    mock_session = MagicMock()
+    mock_session.get.return_value = mock_cm
+
+    with patch("bot.services.reddit.http_client.get_session", AsyncMock(return_value=mock_session)):
+        resolved = await resolve_reddit_url(share_url)
+        assert resolved == share_url
+
+
+@pytest.mark.asyncio
+async def test_extract_data_auth_required():
+    fake_result = GalleryDlResult(
+        auth_required=True,
+        error_message="AUTH_REQUIRED",
+    )
+
+    with patch("bot.services.reddit.run_gallery_dl_json", AsyncMock(return_value=fake_result)):
+        data = await reddit_service.extract_data("https://www.reddit.com/r/test/comments/123/post/")
+        assert data is not None
+        assert data.error_message == "AUTH_REQUIRED_REDDIT"
+
+
+
+@pytest.mark.asyncio
 async def test_extract_data_single_photo():
     fake_meta = {
         "id": "post123",
@@ -337,3 +392,18 @@ async def test_downloader_service_download_media_reddit_video(tmp_path: Path):
         assert media_info.media_type == MediaType.VIDEO
         assert media_info.has_spoiler is True
         assert media_info.uploader == "r/funny • u/comedian"
+
+
+@pytest.mark.asyncio
+async def test_downloader_service_reddit_auth_required_ytdlp():
+    url = "https://www.reddit.com/r/funny/comments/123/post/"
+    with patch("bot.services.reddit.reddit_service.extract_data", AsyncMock(return_value=None)), \
+         patch("asyncio.to_thread", AsyncMock(side_effect=Exception("ERROR: [Reddit] 123: Unable to download webpage: HTTP Error 403: Blocked"))):
+        info = await downloader_service.get_info(url)
+        assert info is not None
+        assert info.error_message == "AUTH_REQUIRED_REDDIT"
+
+        media = await downloader_service.download_media(url)
+        assert media is not None
+        assert media.error_message == "AUTH_REQUIRED_REDDIT"
+

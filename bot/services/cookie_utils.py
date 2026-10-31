@@ -51,11 +51,52 @@ def parse_cookie_services(content: str) -> list[str]:
     if "tiktok.com" in content:
         services.append("TikTok ✅")
 
-    # Pinterest
-    if "pinterest.com" in content:
-        services.append("Pinterest ✅")
+    # Reddit
+    if "reddit.com" in content:
+        has_session = "reddit_session" in content or "token_v2" in content
+        services.append(f"Reddit ({'найден reddit_session ✅' if has_session else 'подключены cookies ✅'})")
 
     return services
+
+
+def parse_cookies_for_domain(content: str, target_domain: str) -> dict[str, str]:
+    """
+    Parse a Netscape cookies text string and extract cookies matching the target domain.
+    """
+    cookies: dict[str, str] = {}
+    if not content:
+        return cookies
+
+    target = target_domain.lower().lstrip(".")
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7:
+            domain = parts[0].lower().lstrip(".")
+            if domain == target or domain.endswith("." + target):
+                name = parts[5]
+                value = parts[6]
+                cookies[name] = value
+    return cookies
+
+
+def get_cookies_for_domain(domain: str) -> dict[str, str]:
+    """
+    Extract key-value cookie pairs for a specific domain from the configured cookies file.
+    """
+    from bot.config import settings
+
+    if not settings.has_cookies:
+        return {}
+
+    try:
+        content = settings.cookies_file.read_text(encoding="utf-8", errors="ignore")
+        return parse_cookies_for_domain(content, domain)
+    except Exception as e:
+        logger.warning(f"Failed to read cookies for domain {domain}: {e}")
+        return {}
 
 
 def sanitize_netscape_content(content: str) -> str:

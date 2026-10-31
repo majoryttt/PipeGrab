@@ -393,10 +393,21 @@ class DownloaderService:
                 "use --cookies",
                 "only available for registered users",
                 "video only available to signed-in users",
-                "video only available to followers"
+                "video only available to followers",
+                "account authentication is required",
+                "403: blocked",
+                "http error 403",
+                "blocked by network security",
             ]):
                 is_story = platform == Platform.INSTAGRAM and "/stories/" in url
-                err_code = "AUTH_REQUIRED_INSTAGRAM_STORY" if is_story else ("AUTH_REQUIRED_INSTAGRAM" if platform == Platform.INSTAGRAM else "AUTH_REQUIRED")
+                if is_story:
+                    err_code = "AUTH_REQUIRED_INSTAGRAM_STORY"
+                elif platform == Platform.INSTAGRAM:
+                    err_code = "AUTH_REQUIRED_INSTAGRAM"
+                elif platform == Platform.REDDIT:
+                    err_code = "AUTH_REQUIRED_REDDIT"
+                else:
+                    err_code = "AUTH_REQUIRED"
                 return MediaInfo(
                     title="Требуется авторизация",
                     duration=0,
@@ -808,12 +819,21 @@ class DownloaderService:
                 "you need to log in",
                 "login required",
                 "checkpoint_required",
+                "confirm you are not a robot",
+                "this content is unreachable",
+                "use --cookies",
                 "only available for registered users",
                 "video only available to signed-in users",
-                "video only available to followers"
+                "video only available to followers",
+                "account authentication is required",
+                "403: blocked",
+                "http error 403",
+                "blocked by network security",
             ]):
                 if platform == Platform.INSTAGRAM:
                     error_msg = "AUTH_REQUIRED_INSTAGRAM"
+                elif platform == Platform.REDDIT:
+                    error_msg = "AUTH_REQUIRED_REDDIT"
                 else:
                     error_msg = "AUTH_REQUIRED"
 

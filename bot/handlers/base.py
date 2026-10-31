@@ -272,7 +272,7 @@ async def handle_document_upload(message: types.Message):
             f"📁 <b>Путь:</b> <code>{settings.cookies_file}</code>\n"
             f"📦 <b>Размер:</b> {file_size_kb:.1f} КБ\n"
             f"🌐 <b>Обнаруженные сервисы:</b>\n{services_str}\n\n"
-            f"🎉 Теперь бот может скачивать истории Instagram и другие авторизованные медиа!",
+            f"🎉 Теперь бот может скачивать истории Instagram, посты Reddit и другие авторизованные медиа!",
             parse_mode="HTML"
         )
     except Exception as e:
