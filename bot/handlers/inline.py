@@ -123,8 +123,7 @@ async def handle_inline_query(inline_query: InlineQuery, bot: Bot):
             "• 📸 Instagram (Reels и публикации)\n"
             "• 📌 Pinterest (видео и фото)\n"
             "• 🐦 Twitter / X\n"
-            "• 🤖 Reddit (видео и галереи)\n"
-            "• 🎥 VK Video"
+            "• 🤖 Reddit (видео и галереи)"
         )
         help_results: list[InlineQueryResultUnion] = [
             InlineQueryResultArticle(
@@ -147,7 +146,7 @@ async def handle_inline_query(inline_query: InlineQuery, bot: Bot):
             InlineQueryResultArticle(
                 id="inline_no_url",
                 title="⚠️ Ссылка не найдена",
-                description="Вставьте ссылку на YouTube, TikTok, Instagram, Pinterest, Reddit или VK",
+                description="Вставьте ссылку на YouTube, TikTok, Instagram, Pinterest или Reddit",
                 input_message_content=InputTextMessageContent(
                     message_text="❌ <b>В запросе не найдена ссылка.</b>\nВведите: <code>@bot_username ссылка</code>",
                     parse_mode="HTML"

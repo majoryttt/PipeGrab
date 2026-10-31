@@ -8,6 +8,7 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
 - **YouTube**: Regular videos, Shorts, audio (MP3), and playlists (with interactive video vs MP3 selection).
 - **TikTok**: Watermark-free videos (direct CDN fast-path), as well as **photo slideshows (Photo Mode)** sent as a Telegram media group with background music as a separate audio file.
 - **Instagram**: Reels, video posts, **single photos**, **photo carousels and albums**, and **Stories** (via cookies).
+- **Reddit**: Videos with audio (`v.redd.it` audio track merge), **photo gallery posts**, RedGifs animations, and clips (with auto-blur for spoilers and NSFW 18+).
 - **Twitter / X**: Videos and clips.
 - **Pinterest**: Original quality photos, albums/carousels (Idea Pins), animated GIFs, videos, and boards.
 
@@ -31,6 +32,11 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
   - Downloads videos and Reels in original quality with audio.
   - High-resolution single photos and carousel albums.
   - Stories support when cookies are provided.
+- **Full Reddit Support**:
+  - High-resolution `v.redd.it` video downloads merged with original audio via FFmpeg.
+  - Album and photo gallery posts sent as clean Telegram media groups.
+  - Looped RedGifs animations support.
+  - Automatic spoiler and NSFW content detection (spoiler tag applied in Telegram).
 - **Full Pinterest Support**:
   - Photos downloaded at maximum original resolution (no preview compression).
   - Albums and carousels (Idea Pins) sent as a neat Telegram media group (up to 10 photos per group).
@@ -52,7 +58,7 @@ An asynchronous Telegram bot for instantly downloading high-quality videos, audi
   - Share videos and MP3s directly inside any dialog or group chat without forwarding!
   - Instant delivery from persistent SQLite cache (`data/cache.db`) for previously downloaded links.
   - Two-stage background rendering for new links with smooth replacement of status placeholder with native video (`editMessageMedia`).
-  - Supports YouTube (video & MP3), TikTok, Reels, Pinterest, and VK.
+  - Supports YouTube (video & MP3), TikTok, Reels, Pinterest, and Reddit.
 - **Overload Protection**: Task queue, concurrent download semaphore, and a limit of 1 active download task per user.
 - **Automatic Cleanup**: Downloaded temporary files are reliably deleted after sending. A background cleaner prevents Local Bot API binlog buildup.
 
@@ -94,7 +100,7 @@ cp .env.example .env
 Open `.env` and fill in your bot token from [@BotFather](https://t.me/BotFather):
 ```env
 BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
-ADMIN_ID=123456789             # Your Telegram user ID to restrict cookie uploads
+ADMIN_ID=123456789             # Your Telegram user ID for /admin panel and cookie uploads
 DELETE_SOURCE_MESSAGE=true     # Auto-delete source link message after download
 ```
 

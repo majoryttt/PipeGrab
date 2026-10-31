@@ -120,7 +120,7 @@ def get_start_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="📖 Справка и возможности", callback_data="help_info"),
-                InlineKeyboardButton(text="🔎 Инлайн-поиск", switch_inline_query_current_chat=""),
+                InlineKeyboardButton(text="💬 Инлайн-режим", switch_inline_query_current_chat=""),
             ]
         ]
     )

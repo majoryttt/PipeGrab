@@ -195,6 +195,7 @@ class StatsService:
             "YouTube": "🎬",
             "Twitter/X": "🐦",
             "Pinterest": "📌",
+            "Reddit": "🤖",
         }
         if summary.top_platforms:
             platform_lines = []
