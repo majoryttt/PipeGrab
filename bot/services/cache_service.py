@@ -33,6 +33,11 @@ def normalize_url(url: str) -> str:
     if "instagram.com" in raw_url:
         return clean_instagram_url(raw_url).rstrip("/")
 
+    # 2. Reddit normalization
+    if "reddit.com" in raw_url or "redd.it" in raw_url:
+        from bot.services.reddit import normalize_reddit_url
+        return normalize_reddit_url(raw_url).rstrip("/")
+
     # Parse URL
     try:
         parsed = urlparse(raw_url)

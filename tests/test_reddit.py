@@ -13,6 +13,7 @@ from bot.services.reddit import (
     RedditData,
     RedditItem,
     is_reddit_url,
+    normalize_reddit_url,
     reddit_service,
     resolve_reddit_url,
 )
@@ -32,11 +33,37 @@ def test_is_reddit_url():
     assert not is_reddit_url("https://fakeredd.it/post")
 
 
+def test_normalize_reddit_url():
+    assert (
+        normalize_reddit_url("https://www.reddit.com/r/python/comments/123/my_code/")
+        == "https://www.reddit.com/r/python/comments/123/"
+    )
+    assert (
+        normalize_reddit_url(
+            "https://www.reddit.com/r/RuProgrammers/comments/1xkm6cw/%25D0%25BE%25D0%25BA_%25D0%25BA%25D0%25BB%25D0%25BE%25D0%25B4/"
+        )
+        == "https://www.reddit.com/r/RuProgrammers/comments/1xkm6cw/"
+    )
+    assert (
+        normalize_reddit_url("https://www.reddit.com/r/python/comments/123/")
+        == "https://www.reddit.com/r/python/comments/123/"
+    )
+    assert (
+        normalize_reddit_url("https://www.reddit.com/comments/123/title/")
+        == "https://www.reddit.com/comments/123/"
+    )
+    assert (
+        normalize_reddit_url("https://www.reddit.com/r/sub/s/share123")
+        == "https://www.reddit.com/r/sub/s/share123"
+    )
+    assert normalize_reddit_url("https://redd.it/123") == "https://redd.it/123"
+
+
 @pytest.mark.asyncio
 async def test_resolve_reddit_url_direct():
     url = "https://www.reddit.com/r/python/comments/123/code/"
     resolved = await resolve_reddit_url(url)
-    assert resolved == url
+    assert resolved == "https://www.reddit.com/r/python/comments/123/"
 
     # v.redd.it and i.redd.it should not trigger any HTTP request
     assert await resolve_reddit_url("https://v.redd.it/abc12345") == "https://v.redd.it/abc12345"
@@ -60,14 +87,14 @@ async def test_resolve_reddit_url_short():
 
     with patch("bot.services.reddit.http_client.get_session", AsyncMock(return_value=mock_session)):
         resolved = await resolve_reddit_url(short_url)
-        assert resolved == target_url
+        assert resolved == "https://www.reddit.com/r/python/comments/abc123/"
 
 
 @pytest.mark.asyncio
 async def test_resolve_reddit_url_301_location():
     share_url = "https://www.reddit.com/r/mybabessin/s/mEDaAAdHj4"
     target_with_params = "https://www.reddit.com/r/mybabessin/comments/1ur3fmw/teens_love/?share_id=qVQKqn4goPHUw8v0nNhLq&utm_content=1"
-    clean_target = "https://www.reddit.com/r/mybabessin/comments/1ur3fmw/teens_love/"
+    clean_target = "https://www.reddit.com/r/mybabessin/comments/1ur3fmw/"
 
     mock_resp = MagicMock()
     mock_resp.status = 301
@@ -406,4 +433,112 @@ async def test_downloader_service_reddit_auth_required_ytdlp():
         media = await downloader_service.download_media(url)
         assert media is not None
         assert media.error_message == "AUTH_REQUIRED_REDDIT"
+
+
+@pytest.mark.asyncio
+async def test_downloader_service_reddit_fallback_ytdlp_success(tmp_path: Path):
+    fake_auth_data = RedditData(
+        post_id="",
+        url="https://www.reddit.com/r/funny/comments/vid123/",
+        title="Требуется авторизация",
+        uploader="Reddit",
+        subreddit="",
+        media_type="photo",
+        error_message="AUTH_REQUIRED_REDDIT",
+    )
+    fake_video = tmp_path / "dummytas_video.mp4"
+    fake_video.write_bytes(b"video bytes")
+    fake_ydl_info = {
+        "title": "Funny video",
+        "duration": 15,
+        "uploader": "comedian",
+        "age_limit": 18,
+    }
+
+    with patch("bot.services.reddit.reddit_service.extract_data", AsyncMock(return_value=fake_auth_data)), \
+         patch.object(downloader_service, "download_dir", tmp_path), \
+         patch("bot.services.downloader.uuid.uuid4", return_value="dummytask123"), \
+         patch("asyncio.to_thread", AsyncMock(return_value=fake_ydl_info)):
+        media_info = await downloader_service.download_media("https://www.reddit.com/r/funny/comments/vid123/")
+        assert media_info is not None
+        assert media_info.platform == Platform.REDDIT
+        assert media_info.media_type == MediaType.VIDEO
+        assert media_info.title == "Funny video"
+        assert media_info.url == "https://www.reddit.com/r/funny/comments/vid123/"
+
+
+@pytest.mark.asyncio
+async def test_downloader_service_reddit_no_media_ytdlp():
+    fake_auth_data = RedditData(
+        post_id="",
+        url="https://www.reddit.com/r/RuProgrammers/comments/1xkm6cw/",
+        title="Требуется авторизация",
+        uploader="Reddit",
+        subreddit="",
+        media_type="photo",
+        error_message="AUTH_REQUIRED_REDDIT",
+    )
+    with patch("bot.services.reddit.reddit_service.extract_data", AsyncMock(return_value=fake_auth_data)), \
+         patch("asyncio.to_thread", AsyncMock(side_effect=Exception("ERROR: [Reddit] 1xkm6cw: No media found"))):
+        media = await downloader_service.download_media("https://www.reddit.com/r/RuProgrammers/comments/1xkm6cw/")
+        assert media is not None
+        assert media.error_message == "NO_MEDIA_REDDIT"
+
+
+@pytest.mark.asyncio
+async def test_downloader_service_reddit_no_media_getinfo_ytdlp():
+    fake_auth_data = RedditData(
+        post_id="",
+        url="https://www.reddit.com/r/RuProgrammers/comments/1xkm6cw/",
+        title="Требуется авторизация",
+        uploader="Reddit",
+        subreddit="",
+        media_type="photo",
+        error_message="AUTH_REQUIRED_REDDIT",
+    )
+    with patch("bot.services.reddit.reddit_service.extract_data", AsyncMock(return_value=fake_auth_data)), \
+         patch("asyncio.to_thread", AsyncMock(side_effect=Exception("ERROR: [Reddit] 1xkm6cw: No media found"))):
+        info = await downloader_service.get_info("https://www.reddit.com/r/RuProgrammers/comments/1xkm6cw/")
+        assert info is not None
+        assert info.error_message == "NO_MEDIA_REDDIT"
+
+
+@pytest.mark.asyncio
+async def test_downloader_service_reddit_getinfo_auth_required_fallback():
+    fake_auth_data = RedditData(
+        post_id="",
+        url="https://www.reddit.com/r/funny/comments/vid123/",
+        title="Требуется авторизация",
+        uploader="Reddit",
+        subreddit="",
+        media_type="photo",
+        error_message="AUTH_REQUIRED_REDDIT",
+    )
+    with patch("bot.services.reddit.reddit_service.extract_data", AsyncMock(return_value=fake_auth_data)), \
+         patch("asyncio.to_thread", AsyncMock(side_effect=Exception("Some general network error"))):
+        info = await downloader_service.get_info("https://www.reddit.com/r/funny/comments/vid123/")
+        assert info is not None
+        assert info.error_message == "AUTH_REQUIRED_REDDIT"
+
+
+@pytest.mark.asyncio
+async def test_downloader_service_reddit_shortlink_returns_canonical_url(tmp_path: Path):
+    fake_video = tmp_path / "dummytas_video.mp4"
+    fake_video.write_bytes(b"video content")
+    fake_ydl_info = {
+        "title": "Shortlink Video",
+        "duration": 10,
+        "uploader": "testuser",
+        "age_limit": 0,
+    }
+
+    with patch("bot.services.downloader.resolve_reddit_url", AsyncMock(return_value="https://www.reddit.com/r/funny/comments/canonical123/")), \
+         patch("bot.services.reddit.reddit_service.extract_data", AsyncMock(return_value=None)), \
+         patch.object(downloader_service, "download_dir", tmp_path), \
+         patch("bot.services.downloader.uuid.uuid4", return_value="dummytask123"), \
+         patch("asyncio.to_thread", AsyncMock(return_value=fake_ydl_info)):
+        media = await downloader_service.download_media("https://www.reddit.com/r/funny/s/shortlink123")
+        assert media is not None
+        assert media.url == "https://www.reddit.com/r/funny/comments/canonical123/"
+
 
