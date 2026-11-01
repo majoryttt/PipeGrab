@@ -894,6 +894,7 @@ async def run_download_task(
             # Check if error message returned
             if media and media.error_message:
                 p_val = media.platform.value if hasattr(media.platform, "value") else str(media.platform)
+                logger.info(f"Download handled with status: {media.error_message} for {url} (user {user_id})")
                 await stats_service.record_download(
                     user_id=user_id,
                     platform=p_val,
@@ -1156,6 +1157,7 @@ async def run_download_task(
                     file_size=media.file_size or 0,
                     status="success"
                 )
+                logger.info(f"Delivered {p_val} {m_val} ({format_size(media.file_size or 0)}) for {url} to chat {chat_id}")
 
                 # Clean up status message and source link in background without blocking queue
                 to_delete = [status_msg.message_id]
