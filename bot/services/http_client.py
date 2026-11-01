@@ -1,10 +1,13 @@
 import asyncio
 import logging
 from collections.abc import Sequence
+from contextlib import suppress
 from pathlib import Path
 
 import aiofiles
 import aiohttp
+
+from bot.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,7 @@ class HTTPClient:
         dest_path: Path,
         headers: dict[str, str] | None = None,
         chunk_size: int = 128 * 1024,
+        proxy: str | None = None,
     ) -> bool:
         """
         Stream download a file from url directly to dest_path using chunked writes.
@@ -62,9 +66,15 @@ class HTTPClient:
         """
         session = await self.get_session()
         req_headers = {**DEFAULT_HEADERS, **(headers or {})}
+        effective_proxy = proxy or settings.download_proxy
         try:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
-            async with session.get(url, headers=req_headers, allow_redirects=True) as resp:
+            async with session.get(
+                url,
+                headers=req_headers,
+                allow_redirects=True,
+                proxy=effective_proxy,
+            ) as resp:
                 if resp.status != 200:
                     logger.warning(f"Download failed with status {resp.status} for {url}")
                     return False
@@ -78,30 +88,30 @@ class HTTPClient:
             if dest_path.exists() and dest_path.stat().st_size > 0:
                 return True
             if dest_path.exists():
-                try:
+                with suppress(Exception):
                     dest_path.unlink()
-                except Exception:
-                    pass
             return False
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning(f"Error downloading file from {url} to {dest_path}: {e}")
             if dest_path.exists():
-                try:
+                with suppress(Exception):
                     dest_path.unlink()
-                except Exception:
-                    pass
             return False
 
     async def download_files_batch(
         self,
         tasks: Sequence[tuple[str, Path]],  # (url, dest_path)
         headers: dict[str, str] | None = None,
+        proxy: str | None = None,
     ) -> list[Path]:
         """
         Download multiple files concurrently using download_file.
         Returns a list of successfully downloaded Path objects.
         """
-        coros = [self.download_file(url, path, headers=headers) for url, path in tasks]
+        if proxy is not None:
+            coros = [self.download_file(url, path, headers=headers, proxy=proxy) for url, path in tasks]
+        else:
+            coros = [self.download_file(url, path, headers=headers) for url, path in tasks]
         results = await asyncio.gather(*coros, return_exceptions=True)
         return [
             path for (url, path), res in zip(tasks, results)

@@ -198,6 +198,8 @@ class DownloaderService:
             ),
         }
 
+        if settings.download_proxy:
+            opts["proxy"] = settings.download_proxy
         if settings.has_cookies and use_cookies:
             opts["cookiefile"] = str(settings.cookies_file)
         return opts
@@ -303,13 +305,25 @@ class DownloaderService:
             )
 
         # 5. Specialized Reddit handler (photos, galleries, videos, RedGifs, and text posts)
+        reddit_data: RedditData | None = None
         if platform == Platform.REDDIT:
             try:
                 resolved_reddit_url = await resolve_reddit_url(url)
                 url = resolved_reddit_url
                 reddit_data = await reddit_service.extract_data(resolved_reddit_url)
                 if reddit_data:
-                    if reddit_data.error_message == "NO_MEDIA_REDDIT":
+                    if reddit_data.error_message == "IP_BLOCKED_REDDIT":
+                        return MediaInfo(
+                            title="IP заблокирован Reddit",
+                            duration=0,
+                            uploader="Reddit",
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.REDDIT,
+                            url=url,
+                            error_message="IP_BLOCKED_REDDIT",
+                        )
+                    elif reddit_data.error_message == "NO_MEDIA_REDDIT":
                         return MediaInfo(
                             title=reddit_data.title,
                             duration=0,
@@ -356,7 +370,7 @@ class DownloaderService:
                                 media_type=MediaType.VIDEO,
                                 has_spoiler=has_spoiler,
                             )
-            except Exception as re:
+            except Exception as re:  # noqa: BLE001
                 logger.warning(f"Reddit extractor failed for {url}, falling back to yt-dlp: {re}")
 
         # 6. Generic yt-dlp extraction
@@ -411,6 +425,96 @@ class DownloaderService:
                     url=url,
                     error_message="NO_MEDIA_REDDIT",
                 )
+            elif platform == Platform.REDDIT and any(term in err_str for term in [
+                "403: blocked",
+                "http error 403",
+                "blocked by network security",
+                "your ip address is unable to access the reddit api",
+            ]):
+                try:
+                    html_data = await reddit_service.extract_from_html(url)
+                    if html_data and not html_data.error_message:
+                        uploader_str = (
+                            f"r/{html_data.subreddit} • u/{html_data.uploader}"
+                            if html_data.subreddit else html_data.uploader
+                        )
+                        has_spoiler = html_data.over_18 or html_data.is_spoiler
+                        if html_data.items and not html_data.is_video and not html_data.external_url:
+                            media_type = (
+                                MediaType.ALBUM if len(html_data.items) > 1
+                                else MediaType(html_data.media_type)
+                            )
+                            return MediaInfo(
+                                title=html_data.title,
+                                duration=0,
+                                uploader=uploader_str,
+                                is_playlist=False,
+                                playlist_count=0,
+                                platform=Platform.REDDIT,
+                                url=html_data.url,
+                                media_type=media_type,
+                                has_spoiler=has_spoiler,
+                            )
+                        elif html_data.is_video or html_data.external_url:
+                            return MediaInfo(
+                                title=html_data.title,
+                                duration=0,
+                                uploader=uploader_str,
+                                is_playlist=False,
+                                playlist_count=0,
+                                platform=Platform.REDDIT,
+                                url=html_data.url,
+                                media_type=MediaType.VIDEO,
+                                has_spoiler=has_spoiler,
+                            )
+                    elif html_data and html_data.error_message == "IP_BLOCKED_REDDIT":
+                        return MediaInfo(
+                            title="IP заблокирован Reddit",
+                            duration=0,
+                            uploader="Reddit",
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=platform,
+                            url=url,
+                            error_message="IP_BLOCKED_REDDIT",
+                        )
+                    elif html_data and html_data.error_message == "NO_MEDIA_REDDIT":
+                        return MediaInfo(
+                            title=html_data.title,
+                            duration=0,
+                            uploader=html_data.uploader,
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=platform,
+                            url=url,
+                            error_message="NO_MEDIA_REDDIT",
+                            has_spoiler=html_data.over_18 or html_data.is_spoiler,
+                        )
+                except Exception as he:  # noqa: BLE001
+                    logger.warning(f"HTML scraper fallback failed in get_info: {he}")
+
+            # Check if this is an IP block on Reddit
+            if platform == Platform.REDDIT and (
+                any(term in err_str for term in [
+                    "your ip address is unable to access the reddit api",
+                    "blocked by network security",
+                ])
+                or (
+                    settings.has_cookies
+                    and any(term in err_str for term in ["403: blocked", "http error 403", "403 forbidden"])
+                )
+                or (reddit_data and reddit_data.error_message == "IP_BLOCKED_REDDIT")
+            ):
+                return MediaInfo(
+                    title="IP заблокирован Reddit",
+                    duration=0,
+                    uploader="Reddit",
+                    is_playlist=False,
+                    playlist_count=0,
+                    platform=platform,
+                    url=url,
+                    error_message="IP_BLOCKED_REDDIT",
+                )
             elif any(term in err_str for term in [
                 "you need to log in",
                 "login required",
@@ -433,11 +537,11 @@ class DownloaderService:
                 elif platform == Platform.INSTAGRAM:
                     err_code = "AUTH_REQUIRED_INSTAGRAM"
                 elif platform == Platform.REDDIT:
-                    err_code = "AUTH_REQUIRED_REDDIT"
+                    err_code = "IP_BLOCKED_REDDIT" if settings.has_cookies else "AUTH_REQUIRED_REDDIT"
                 else:
                     err_code = "AUTH_REQUIRED"
                 return MediaInfo(
-                    title="Требуется авторизация",
+                    title="IP заблокирован Reddit" if err_code == "IP_BLOCKED_REDDIT" else "Требуется авторизация",
                     duration=0,
                     uploader="Unknown",
                     is_playlist=False,
@@ -449,17 +553,22 @@ class DownloaderService:
             elif (
                 platform == Platform.REDDIT
                 and reddit_data
-                and reddit_data.error_message == "AUTH_REQUIRED_REDDIT"
+                and reddit_data.error_message in ("AUTH_REQUIRED_REDDIT", "IP_BLOCKED_REDDIT")
             ):
+                err_code = (
+                    "IP_BLOCKED_REDDIT"
+                    if (reddit_data.error_message == "IP_BLOCKED_REDDIT" or settings.has_cookies)
+                    else "AUTH_REQUIRED_REDDIT"
+                )
                 return MediaInfo(
-                    title="Требуется авторизация",
+                    title="IP заблокирован Reddit" if err_code == "IP_BLOCKED_REDDIT" else "Требуется авторизация",
                     duration=0,
                     uploader="Reddit",
                     is_playlist=False,
                     playlist_count=0,
                     platform=platform,
                     url=url,
-                    error_message="AUTH_REQUIRED_REDDIT",
+                    error_message=err_code,
                 )
             elif "private account" in err_str or "this account is private" in err_str:
                 return MediaInfo(
@@ -576,15 +685,29 @@ class DownloaderService:
         # 4. Specialized Reddit handler
         reddit_has_spoiler = False
         reddit_uploader_override: str | None = None
+        reddit_title_override: str | None = None
         target_download_url = url
+        reddit_post_url = url
         reddit_data: RedditData | None = None
         if platform == Platform.REDDIT:
             try:
                 resolved_reddit_url = await resolve_reddit_url(url)
+                reddit_post_url = resolved_reddit_url
                 target_download_url = resolved_reddit_url
                 reddit_data = await reddit_service.extract_data(resolved_reddit_url)
                 if reddit_data:
-                    if reddit_data.error_message == "NO_MEDIA_REDDIT":
+                    if reddit_data.error_message == "IP_BLOCKED_REDDIT":
+                        return MediaInfo(
+                            title="IP заблокирован Reddit",
+                            duration=0,
+                            uploader="Reddit",
+                            is_playlist=False,
+                            playlist_count=0,
+                            platform=Platform.REDDIT,
+                            url=target_download_url,
+                            error_message="IP_BLOCKED_REDDIT",
+                        )
+                    elif reddit_data.error_message == "NO_MEDIA_REDDIT":
                         return MediaInfo(
                             title=reddit_data.title,
                             duration=0,
@@ -602,6 +725,7 @@ class DownloaderService:
                             f"r/{reddit_data.subreddit} • u/{reddit_data.uploader}"
                             if reddit_data.subreddit else reddit_data.uploader
                         )
+                        reddit_title_override = reddit_data.title
 
                         if reddit_data.items and not reddit_data.is_video and not audio_only and not reddit_data.external_url:
                             files, final_type = await reddit_service.download_media(reddit_data, self.download_dir)
@@ -619,6 +743,8 @@ class DownloaderService:
 
                         if reddit_data.external_url:
                             target_download_url = reddit_data.external_url
+                        elif reddit_data.video_url:
+                            target_download_url = reddit_data.video_url
                         elif reddit_data.url:
                             target_download_url = reddit_data.url
                     else:
@@ -626,7 +752,7 @@ class DownloaderService:
                         # Fall through to yt-dlp using resolved canonical post URL
                         if reddit_data.url:
                             target_download_url = reddit_data.url
-            except Exception as re:
+            except Exception as re:  # noqa: BLE001
                 logger.warning(f"Reddit direct download failed for {url}: {re}")
 
         # 5. yt-dlp download (for YouTube, TikTok, Instagram, Twitter, Pinterest, and Reddit videos)
@@ -762,8 +888,17 @@ class DownloaderService:
                 else url
             )
 
+            final_title = title
+            if platform == Platform.REDDIT and reddit_title_override and (
+                not title
+                or title in ("media", "video", "Unknown Title", target_download_url)
+                or title.lower().startswith("hlsplaylist")
+                or len(title) <= 12
+            ):
+                final_title = reddit_title_override
+
             return MediaInfo(
-                title=title,
+                title=final_title,
                 duration=duration,
                 uploader=final_uploader,
                 is_playlist=False,
@@ -849,9 +984,10 @@ class DownloaderService:
                     logger.error(f"TikTok fallback download failed: {te}")
 
             # Fallback for Reddit if yt-dlp failed
+            html_data: RedditData | None = None
             if platform == Platform.REDDIT and not audio_only:
                 try:
-                    if reddit_data and reddit_data.items:
+                    if reddit_data and reddit_data.items and not reddit_data.is_video and not reddit_data.external_url:
                         files, final_type = await reddit_service.download_media(reddit_data, self.download_dir)
                         if files:
                             uploader_str = (
@@ -868,7 +1004,105 @@ class DownloaderService:
                                 duration=0,
                                 has_spoiler=reddit_has_spoiler,
                             )
-                except Exception as re:
+                    else:
+                        html_data = await reddit_service.extract_from_html(reddit_post_url)
+                        if html_data and html_data.error_message == "NO_MEDIA_REDDIT":
+                            return MediaInfo(
+                                title=html_data.title,
+                                duration=0,
+                                uploader=html_data.uploader,
+                                is_playlist=False,
+                                playlist_count=0,
+                                platform=Platform.REDDIT,
+                                url=reddit_post_url,
+                                error_message="NO_MEDIA_REDDIT",
+                                has_spoiler=html_data.over_18 or html_data.is_spoiler,
+                            )
+                        elif html_data and html_data.error_message == "IP_BLOCKED_REDDIT":
+                            return MediaInfo(
+                                title="IP заблокирован Reddit",
+                                duration=0,
+                                uploader="Reddit",
+                                is_playlist=False,
+                                playlist_count=0,
+                                platform=Platform.REDDIT,
+                                url=reddit_post_url,
+                                error_message="IP_BLOCKED_REDDIT",
+                            )
+                        elif html_data and (html_data.is_video or html_data.external_url) and (html_data.video_url or html_data.external_url):
+                            video_dl_url = html_data.video_url or html_data.external_url
+                            if video_dl_url and video_dl_url != target_download_url:
+                                try:
+                                    def _download_fallback_video(use_cookies: bool = True):
+                                        opts = _build_ydl_opts(use_cookies)
+                                        with yt_dlp.YoutubeDL(opts) as ydl:
+                                            return ydl.extract_info(video_dl_url, download=True)
+
+                                    fallback_info = await asyncio.to_thread(_download_fallback_video, settings.has_cookies)
+                                    if fallback_info:
+                                        files = list(self.download_dir.glob(f"{task_id}_*"))
+                                        if files:
+                                            file_path = files[0]
+                                            for f in files:
+                                                if f.suffix.lower() == ".mp4":
+                                                    file_path = f
+                                                    break
+                                            candidate_thumb = self.download_dir / f"{task_id}_thumb.jpg"
+                                            thumb_path = await generate_thumbnail(file_path, candidate_thumb, timestamp=1.0)
+                                            uploader_str = (
+                                                f"r/{html_data.subreddit} • u/{html_data.uploader}"
+                                                if html_data.subreddit else html_data.uploader
+                                            )
+                                            fallback_dur = int(fallback_info.get("duration") or 0)
+                                            fallback_w = fallback_info.get("width") or 0
+                                            fallback_h = fallback_info.get("height") or 0
+                                            if not (fallback_dur and fallback_w and fallback_h):
+                                                meta = await get_video_metadata(file_path)
+                                                if not fallback_dur and meta.get("duration"):
+                                                    fallback_dur = meta["duration"]
+                                                if not fallback_w and meta.get("width"):
+                                                    fallback_w = meta["width"]
+                                                if not fallback_h and meta.get("height"):
+                                                    fallback_h = meta["height"]
+
+                                            return MediaInfo(
+                                                title=html_data.title,
+                                                duration=fallback_dur,
+                                                uploader=uploader_str,
+                                                is_playlist=False,
+                                                playlist_count=0,
+                                                platform=Platform.REDDIT,
+                                                url=html_data.url,
+                                                media_type=MediaType.VIDEO,
+                                                file_path=file_path,
+                                                file_paths=[file_path],
+                                                thumbnail_path=thumb_path,
+                                                width=fallback_w,
+                                                height=fallback_h,
+                                                file_size=file_path.stat().st_size,
+                                                has_spoiler=html_data.over_18 or html_data.is_spoiler,
+                                            )
+                                except Exception as v_err:  # noqa: BLE001
+                                    logger.warning(f"yt-dlp fallback on HTML video_url failed: {v_err}")
+
+                        if html_data and html_data.items and not html_data.is_video and not html_data.external_url:
+                            files, final_type = await reddit_service.download_media(html_data, self.download_dir)
+                            if files:
+                                uploader_str = (
+                                    f"r/{html_data.subreddit} • u/{html_data.uploader}"
+                                    if html_data.subreddit else html_data.uploader
+                                )
+                                return await self._build_media_info(
+                                    files=files,
+                                    final_type=final_type,
+                                    title=html_data.title,
+                                    uploader=uploader_str,
+                                    url=html_data.url,
+                                    platform=Platform.REDDIT,
+                                    duration=0,
+                                    has_spoiler=html_data.over_18 or html_data.is_spoiler,
+                                )
+                except Exception as re:  # noqa: BLE001
                     logger.error(f"Reddit fallback download failed: {re}")
 
             error_msg = None
@@ -877,6 +1111,19 @@ class DownloaderService:
                 "no video formats found",
             ]):
                 error_msg = "NO_MEDIA_REDDIT"
+            elif platform == Platform.REDDIT and (
+                any(term in err_str for term in [
+                    "your ip address is unable to access the reddit api",
+                    "blocked by network security",
+                ])
+                or (
+                    settings.has_cookies
+                    and any(term in err_str for term in ["403: blocked", "http error 403", "403 forbidden"])
+                )
+                or (reddit_data and reddit_data.error_message == "IP_BLOCKED_REDDIT")
+                or (html_data and html_data.error_message == "IP_BLOCKED_REDDIT")
+            ):
+                error_msg = "IP_BLOCKED_REDDIT"
             elif any(term in err_str for term in [
                 "you need to log in",
                 "login required",
@@ -896,15 +1143,19 @@ class DownloaderService:
                 if platform == Platform.INSTAGRAM:
                     error_msg = "AUTH_REQUIRED_INSTAGRAM"
                 elif platform == Platform.REDDIT:
-                    error_msg = "AUTH_REQUIRED_REDDIT"
+                    error_msg = "IP_BLOCKED_REDDIT" if settings.has_cookies else "AUTH_REQUIRED_REDDIT"
                 else:
                     error_msg = "AUTH_REQUIRED"
             elif (
                 platform == Platform.REDDIT
                 and reddit_data
-                and reddit_data.error_message == "AUTH_REQUIRED_REDDIT"
+                and reddit_data.error_message in ("AUTH_REQUIRED_REDDIT", "IP_BLOCKED_REDDIT")
             ):
-                error_msg = "AUTH_REQUIRED_REDDIT"
+                error_msg = (
+                    "IP_BLOCKED_REDDIT"
+                    if (reddit_data.error_message == "IP_BLOCKED_REDDIT" or settings.has_cookies)
+                    else "AUTH_REQUIRED_REDDIT"
+                )
 
             return MediaInfo(
                 title="Error",

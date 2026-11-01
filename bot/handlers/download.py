@@ -504,6 +504,24 @@ async def handle_text_message(message: types.Message):
                 )
             await update_status_safely(status_msg, story_msg)
             return
+        elif info.error_message == "IP_BLOCKED_REDDIT":
+            if is_admin:
+                ip_msg = (
+                    "🚫 <b>IP-адрес сервера заблокирован Reddit (Fastly / 403 Blocked).</b>\n\n"
+                    "Reddit блокирует запросы из дата-центров (<i>'Blocked by network security'</i> / <i>'Your IP address is unable to access the Reddit API'</i>).\n\n"
+                    "<b>Как решить проблему:</b>\n"
+                    "Укажите исходящий прокси в файле <code>.env</code>:\n"
+                    "<code>DOWNLOAD_PROXY=http://user:pass@host:port</code> (или <code>PROXY_URL</code>).\n\n"
+                    "<i>После настройки прокси перезапустите бота.</i>"
+                )
+            else:
+                ip_msg = (
+                    "🚫 <b>Reddit временно недоступен.</b>\n\n"
+                    "IP-адрес сервера заблокирован сетевой защитой Reddit от ботов.\n"
+                    "Администратор бота может настроить прокси (<code>DOWNLOAD_PROXY</code>) для восстановления доступа."
+                )
+            await update_status_safely(status_msg, ip_msg)
+            return
         elif info.error_message == "AUTH_REQUIRED_REDDIT":
             if is_admin:
                 reddit_msg = (
@@ -915,6 +933,24 @@ async def run_download_task(
                             "Для доступа к историям администратор бота должен загрузить файл cookies."
                         )
                     await update_status_safely(status_msg, auth_err_msg)
+                elif media.error_message == "IP_BLOCKED_REDDIT":
+                    is_admin = bool(settings.admin_id and user_id == settings.admin_id)
+                    if is_admin:
+                        reddit_err_msg = (
+                            "🚫 <b>IP-адрес сервера заблокирован Reddit (Fastly / 403 Blocked).</b>\n\n"
+                            "Reddit блокирует запросы с IP-адресов дата-центров к своему API и страницам.\n\n"
+                            "<b>Как решить проблему:</b>\n"
+                            "Укажите исходящий прокси в файле <code>.env</code>:\n"
+                            "<code>DOWNLOAD_PROXY=http://user:pass@host:port</code> (или <code>PROXY_URL</code>).\n\n"
+                            "<i>После настройки прокси бот будет отправлять запросы через него.</i>"
+                        )
+                    else:
+                        reddit_err_msg = (
+                            "🚫 <b>Reddit временно недоступен.</b>\n\n"
+                            "IP-адрес сервера заблокирован сетевой защитой Reddit.\n"
+                            "Администратор бота должен настроить прокси (<code>DOWNLOAD_PROXY</code>) для доступа."
+                        )
+                    await update_status_safely(status_msg, reddit_err_msg)
                 elif media.error_message == "AUTH_REQUIRED_REDDIT":
                     is_admin = bool(settings.admin_id and user_id == settings.admin_id)
                     if is_admin:

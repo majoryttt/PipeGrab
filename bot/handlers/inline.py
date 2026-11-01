@@ -454,6 +454,10 @@ async def process_inline_download(
             if not media or not has_files:
                 if media and media.error_message == "NO_MEDIA_REDDIT":
                     err_msg_text = "ℹ️ <b>В посте Reddit нет медиафайла</b> (текстовая запись или внешняя ссылка)."
+                elif media and media.error_message == "IP_BLOCKED_REDDIT":
+                    err_msg_text = "🚫 <b>IP сервера заблокирован Reddit. Укажите DOWNLOAD_PROXY в .env.</b>"
+                elif media and media.error_message == "AUTH_REQUIRED_REDDIT":
+                    err_msg_text = "🔒 <b>Для скачивания с Reddit требуется авторизация (cookies).</b>"
                 elif media and media.error_message == "AUTH_REQUIRED":
                     err_msg_text = "❌ <b>Требуется авторизация для доступа к этому медиа.</b>"
                 else:

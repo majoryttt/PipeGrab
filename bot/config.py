@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _bin_dir = str(Path(sys.executable).parent)
@@ -23,6 +24,10 @@ class Settings(BaseSettings):
     local_bot_api_url: str | None = None
     local_bot_api_server_path: str = "/var/lib/telegram-bot-api"
     telegram_proxy: str | None = None
+    download_proxy: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DOWNLOAD_PROXY", "PROXY_URL", "download_proxy", "proxy_url"),
+    )
     max_file_size_mb: int = 50
     max_playlist_items: int = 20
     max_concurrent_downloads: int = 3
